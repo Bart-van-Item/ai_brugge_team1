@@ -3,3 +3,4 @@ matplotlib>=3.11,<4.0
 streamlit>=1.58,<2.0
 plotly>=6.8,<7.0
 scikit-learn>=1.9,<2.0
+requests>=2.32,<3.0
