@@ -4,52 +4,13 @@ Data analysis of solar panel (PV) output and weather data for three locations in
 house1 (4 kW inverter, 2 panel directions), house2 (2.2 kW, 1 direction) and the
 Reactor site (22 kW, 32.7 kWp).
 
-## Setup
+## Getting started
 
-```powershell
-python -m venv venv
-venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+See `STARTUP.md` for the setup, data prep, model training and dashboard commands in order.
 
-If `Activate.ps1` is blocked by the execution policy, run this once for the session:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
-```
-
-## Prepare the data first
-
-Everything reads from `data/clean/`, which is generated from `data/raw/` by `prep_data.py`.
-Run it once before anything else (and again whenever the raw data changes):
-
-```powershell
-python prep_data.py
-```
-
-See `docs/data-prep.md` for what the cleaning does and why.
-
-## Running the dashboard
-
-The interactive dashboard is a Streamlit app. Start it with the `streamlit` command,
-**not** with `python`:
-
-```powershell
-venv\Scripts\Activate.ps1     # if not already active
-streamlit run dashboard.py
-```
-
-Or in one line without activating the venv first (works in any fresh terminal):
-
-```powershell
-venv\Scripts\streamlit.exe run dashboard.py
-```
-
-It opens automatically in your browser at http://localhost:8501. Stop it with Ctrl+C.
-
-> Do not run `python dashboard.py` (and do not use the VS Code Run/Play button, which
-> does the same). Streamlit needs its own runtime, so running the file directly only
-> prints `missing ScriptRunContext` warnings and never opens the app.
+Background: `data/clean/` is generated from `data/raw/` by `prep_data.py` (see
+`docs/data-prep.md`). The dashboard is a Streamlit app, so run it with
+`streamlit run dashboard.py`, never `python dashboard.py`.
 
 ## Other scripts
 
@@ -61,6 +22,7 @@ python weather_correlation.py   # irradiance/temperature vs output
 python anomalies.py             # underperforming days per site
 python -m plots.daily_output_plots   # save output/power-curve PNGs to plots/output/
 python -m plots.anomaly_plots        # save anomaly PNGs to plots/output/
+python machine-learning/train.py     # train models, save best per site to machine-learning/models/
 ```
 
 ## Files
