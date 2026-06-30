@@ -1,0 +1,16 @@
+site,theme,n_features,r2,mae_kwh
+house1,general,20,0.6178,0.1396
+house1,direction,8,0.6487,0.1381
+house1,time_season,6,0.1951,0.2027
+house1,weather,14,0.4128,0.2012
+house1,irradiance,6,0.1929,0.2439
+house2,general,20,0.765,0.052
+house2,direction,8,0.7087,0.0583
+house2,time_season,6,0.1731,0.0974
+house2,weather,14,0.4886,0.0869
+house2,irradiance,6,0.2426,0.1096
+reactor,general,20,0.8727,0.3595
+reactor,direction,8,0.8183,0.4262
+reactor,time_season,6,0.675,0.5804
+reactor,weather,14,0.7423,0.6164
+reactor,irradiance,6,0.6486,0.705

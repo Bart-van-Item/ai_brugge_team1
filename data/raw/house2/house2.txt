@@ -1,0 +1,4 @@
+House2:
+
+2,2kW inverter
+2,4kWp geinstalleerd vermogen.

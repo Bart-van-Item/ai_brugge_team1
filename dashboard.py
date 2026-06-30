@@ -1,0 +1,931 @@
+"""
+Interactive Streamlit dashboard for the PV / weather analysis.
+
+Multipage app (sidebar navigation), grouped into:
+- Start:    Overview, Data guide
+- Sites:    House 1, House 2, Reactor, Compare
+- Analysis: Time of day, Weather, Anomalies
+- Machine learning: Models, Predict
+
+Run: streamlit run dashboard.py
+"""
+
+import math
+import sys
+from datetime import date
+from pathlib import Path
+
+import requests
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+from analysis import SITES, daily_energy
+from weather_correlation import joined_data, RAD_COL, TEMP_COL
+from anomalies import daily_yield_ratio, flag_anomalies
+
+# the machine-learning/ dir has a hyphen (not importable as a package), so add it
+# to the path and import its modules directly
+ML_DIR = Path(__file__).resolve().parent / "machine-learning"
+sys.path.insert(0, str(ML_DIR))
+from orientation import estimate_azimuth  # noqa: E402
+
+SITE_COLORS = {"house1": "#1f77b4", "house2": "#ff7f0e", "reactor": "#2ca02c"}
+SITE_FILL = {"house1": "rgba(31,119,180,0.12)", "house2": "rgba(255,127,14,0.12)", "reactor": "rgba(44,160,44,0.12)"}
+
+# installation metadata, used by the site pages and Compare
+SITE_INFO = {
+    "house1": {"label": "House 1", "inverter_kw": 4.0, "dcac": 1.56,
+               "arrays": "3 arrays (4 + 1.5 + 0.75 kWp), 2 directions"},
+    "house2": {"label": "House 2", "inverter_kw": 2.2, "dcac": 1.09,
+               "arrays": "1 array (2.4 kWp), 1 direction"},
+    "reactor": {"label": "Reactor", "inverter_kw": 22.0, "dcac": 1.49,
+                "arrays": "2 arrays (16.35 + 16.35 kWp)"},
+}
+
+# WMO weather codes present in this dataset, grouped for readability
+WMO_LABELS = {
+    0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+    45: "Fog", 51: "Light drizzle", 53: "Drizzle", 55: "Dense drizzle",
+    61: "Slight rain", 63: "Rain", 65: "Heavy rain",
+    73: "Moderate snow", 75: "Heavy snow",
+}
+
+RESAMPLE_RULES = {"Day": "D", "Week": "W", "Month": "MS"}
+
+PLOTLY_LAYOUT = dict(
+    template="plotly_white",
+    font=dict(family="Arial, sans-serif", size=13),
+    legend=dict(bgcolor="rgba(0,0,0,0)", borderwidth=0),
+    margin=dict(t=60, b=40),
+)
+
+
+@st.cache_data
+def get_daily_energy(site_name: str) -> pd.Series:
+    return daily_energy(site_name)
+
+
+@st.cache_data
+def get_joined(site_name: str) -> pd.DataFrame:
+    return joined_data(site_name)
+
+
+@st.cache_data
+def get_yield_ratio(site_name: str, min_rad: float) -> pd.DataFrame:
+    return daily_yield_ratio(site_name, min_rad)
+
+
+@st.cache_data
+def get_anomalies(site_name: str, z: float, min_rad: float) -> pd.DataFrame:
+    return flag_anomalies(site_name, z, min_rad)
+
+
+@st.cache_data
+def get_ml_csv(name: str) -> pd.DataFrame:
+    return pd.read_csv(ML_DIR / name)
+
+
+@st.cache_data
+def get_orientations() -> pd.DataFrame:
+    return pd.DataFrame([estimate_azimuth(s) for s in SITES])
+
+
+@st.cache_data
+def get_clipping_curve() -> pd.DataFrame:
+    """Max output per irradiance bin per site, normalized to each site's own peak,
+    so the inverter clipping plateau is visible on one shared 0-1 axis."""
+    rows = []
+    for name in SITES:
+        df = get_joined(name)
+        df = df[df[RAD_COL] > 25]
+        bins = pd.cut(df[RAD_COL], range(0, 1001, 100))
+        peak = df.groupby(bins, observed=True)["energy"].max()
+        peak = peak / peak.max()  # normalize to this site's max
+        for interval, val in peak.items():
+            rows.append({"site": name, "irradiance": interval.mid, "rel_max_output": val})
+    return pd.DataFrame(rows)
+
+
+@st.cache_resource
+def _compact_model(site_name: str):
+    """Small RandomForest on irradiance + hour (sin/cos) + temperature, for the
+    interactive predict widget. Cached so the sliders stay responsive."""
+    from sklearn.ensemble import RandomForestRegressor
+    from features import build_features
+
+    X, y = build_features(site_name, "quarterly")
+    feats = X[["shortwave_radiation (W/m²)", "hour_sin", "hour_cos", "temperature_2m (°C)"]]
+    model = RandomForestRegressor(n_estimators=120, random_state=42, n_jobs=-1)
+    model.fit(feats, y)
+    return model
+
+
+def predict_compact(site_name: str, irradiance: float, hour: int, temp: float) -> float:
+    import numpy as np
+
+    radians = 2 * np.pi * hour / 24
+    row = pd.DataFrame([{
+        "shortwave_radiation (W/m²)": irradiance,
+        "hour_sin": np.sin(radians), "hour_cos": np.cos(radians),
+        "temperature_2m (°C)": temp,
+    }])
+    return max(0.0, float(_compact_model(site_name).predict(row)[0]))
+
+
+def _irr_profile(peak_wm2: float, peak_hour: float = 12.5, sigma: float = 3.5) -> tuple:
+    """Gaussian irradiance profile across 24 hours, zeroed outside daylight."""
+    profile = []
+    for h in range(24):
+        if h < 5 or h > 21:
+            profile.append(0.0)
+        else:
+            profile.append(max(0.0, peak_wm2 * math.exp(-0.5 * ((h - peak_hour) / sigma) ** 2)))
+    return tuple(profile)
+
+
+DAY_PROFILES = {
+    "Clear summer": _irr_profile(850),
+    "Partly cloudy": _irr_profile(400, sigma=3.0),
+    "Overcast": _irr_profile(80, sigma=4.5),
+}
+
+
+@st.cache_data
+def predict_sweep(site_name: str, hour: int, temp: float) -> list:
+    """Predicted output across all irradiance levels (0-900 W/m²) for one site."""
+    import numpy as np
+    model = _compact_model(site_name)
+    irr_range = list(range(0, 925, 25))
+    radians = 2 * math.pi * hour / 24
+    df = pd.DataFrame({
+        "shortwave_radiation (W/m²)": irr_range,
+        "hour_sin": [math.sin(radians)] * len(irr_range),
+        "hour_cos": [math.cos(radians)] * len(irr_range),
+        "temperature_2m (°C)": [temp] * len(irr_range),
+    })
+    return [max(0.0, float(p)) for p in model.predict(df)]
+
+
+@st.cache_data
+def predict_day_hourly(site_name: str, irr_profile: tuple, temp_profile: tuple) -> list:
+    """Like predict_day but accepts per-hour temperature values."""
+    model = _compact_model(site_name)
+    hours = list(range(24))
+    df = pd.DataFrame({
+        "shortwave_radiation (W/m²)": list(irr_profile),
+        "hour_sin": [math.sin(2 * math.pi * h / 24) for h in hours],
+        "hour_cos": [math.cos(2 * math.pi * h / 24) for h in hours],
+        "temperature_2m (°C)": list(temp_profile),
+    })
+    return [max(0.0, float(p)) for p in model.predict(df)]
+
+
+def fetch_today_weather() -> tuple:
+    """Fetch today's hourly irradiance and temperature from Open-Meteo (same source as the dataset)."""
+    today = date.today().isoformat()
+    resp = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": 50.908,
+            "longitude": 3.248,
+            "hourly": "shortwave_radiation,temperature_2m",
+            "timezone": "GMT",
+            "start_date": today,
+            "end_date": today,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    irr = tuple(float(v) for v in data["hourly"]["shortwave_radiation"])
+    temp = tuple(float(v) for v in data["hourly"]["temperature_2m"])
+    return irr, temp
+
+
+@st.cache_data
+def predict_day(site_name: str, irr_profile: tuple, temp: float) -> list:
+    """Predicted output for each of 24 hours given an irradiance profile."""
+    model = _compact_model(site_name)
+    hours = list(range(24))
+    df = pd.DataFrame({
+        "shortwave_radiation (W/m²)": list(irr_profile),
+        "hour_sin": [math.sin(2 * math.pi * h / 24) for h in hours],
+        "hour_cos": [math.cos(2 * math.pi * h / 24) for h in hours],
+        "temperature_2m (°C)": [temp] * 24,
+    })
+    return [max(0.0, float(p)) for p in model.predict(df)]
+
+
+@st.cache_data
+def get_daily_profile(site_name: str) -> pd.Series:
+    """Average output (kWh) per hour of day over sunny days, for the time-of-day
+    and orientation views."""
+    df = get_joined(site_name)
+    daily_rad = df[RAD_COL].resample("D").sum()
+    sunny = daily_rad[daily_rad > daily_rad.quantile(0.75)].index.normalize()
+    lit = df[df.index.normalize().isin(sunny)]
+    return lit.groupby(lit.index.hour)["energy"].mean()
+
+
+def date_bounds():
+    starts, ends = [], []
+    for name in SITES:
+        idx = get_daily_energy(name).index
+        starts.append(idx.min())
+        ends.append(idx.max())
+    return min(starts).date(), max(ends).date()
+
+
+def period_delta(series: pd.Series, date_range):
+    """Return a delta string like '+12%' comparing the selected range to the equal-length period before it."""
+    start = pd.Timestamp(date_range[0])
+    end = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)
+    length = end - start
+    prev_start = start - length
+    current = series[in_range(series.index, date_range)].sum()
+    previous = series[(series.index >= prev_start) & (series.index < start)].sum()
+    if previous == 0 or pd.isna(previous):
+        return None
+    pct = (current - previous) / previous * 100
+    sign = "+" if pct >= 0 else ""
+    return f"{sign}{pct:.0f}%"
+
+
+# --- global sidebar controls, shared by every page --------------------------
+
+st.set_page_config(page_title="PV Dashboard — AI Brugge Team 1", layout="wide")
+
+MIN_DATE, MAX_DATE = date_bounds()
+
+
+def filter_controls(key: str, with_sites: bool = True):
+    """Date range (+ optional site filter) shown inline above the graphs, inside
+    an expander so it stays close to the charts without taking much space."""
+    with st.expander("Filters", expanded=False):
+        date_range = st.slider(
+            "Date range", min_value=MIN_DATE, max_value=MAX_DATE,
+            value=(MIN_DATE, MAX_DATE), key=f"{key}_date",
+        )
+        selected_sites = list(SITES)
+        if with_sites:
+            selected_sites = st.multiselect(
+                "Sites", options=list(SITES), default=list(SITES), key=f"{key}_sites",
+            ) or list(SITES)
+    return date_range, selected_sites
+
+
+def in_range(index, date_range) -> pd.Series:
+    start = pd.Timestamp(date_range[0])
+    end = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)
+    return (index >= start) & (index < end)
+
+
+# === PAGES ==================================================================
+
+def page_overview():
+    st.title("Solar PV Dashboard")
+    st.markdown(
+        "Output, weather and machine learning for **three PV installations** in the Bruges region. "
+        "Use the menu on the left to explore each site, compare them, or try the prediction model."
+    )
+    date_range, selected_sites = filter_controls("overview")
+
+    cols = st.columns(len(SITES))
+    for col, name in zip(cols, SITES):
+        daily = get_daily_energy(name)
+        delta = period_delta(daily, date_range)
+        col.metric(
+            SITE_INFO[name]["label"],
+            f"{daily[lambda s: in_range(s.index, date_range)].sum():,.0f} kWh",
+            delta=delta,
+            help=f"Total over the selected range vs the equal-length period before it. {SITES[name]['kwp']} kWp installed.",
+        )
+
+    st.subheader("Energy output over time")
+    resolution = st.radio("Aggregation", list(RESAMPLE_RULES), horizontal=True, index=0, key="ov_res")
+    fig = go.Figure()
+    for name in selected_sites:
+        agg = get_daily_energy(name)[lambda s: in_range(s.index, date_range)].resample(
+            RESAMPLE_RULES[resolution]).sum(min_count=1)
+        color = SITE_COLORS[name]
+        fig.add_trace(go.Scatter(
+            x=agg.index, y=agg.values, name=name,
+            fill="tozeroy", mode="lines",
+            line=dict(color=color, width=1.5),
+            fillcolor=SITE_FILL[name],
+        ))
+        if resolution == "Day" and len(agg) >= 7:
+            rolling = agg.rolling(7, center=True, min_periods=4).mean()
+            fig.add_trace(go.Scatter(
+                x=rolling.index, y=rolling.values, name=f"{name} 7d avg",
+                mode="lines", line=dict(color=color, width=2, dash="dash"),
+                showlegend=False, hoverinfo="skip",
+            ))
+    fig.update_layout(yaxis_title="Energy (kWh)", xaxis_title="Date",
+                      title=f"{resolution} energy output per site", height=450,
+                      **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+
+
+def page_data_guide():
+    st.title("Data guide")
+    st.markdown(
+        "Everything is built from per-15-minute **weather** data (Open-Meteo) and **PV output** data, "
+        "for three sites. The full column reference is in `docs/data-dictionary.md`."
+    )
+    st.subheader("The three data sources")
+    st.dataframe(pd.DataFrame([
+        {"source": "PV output (house1, house2)", "format": "CSV, comma decimals", "unit": "Wh per 15 min",
+         "note": "one row per timestamp, from the inverter"},
+        {"source": "Reactor meter", "format": "CSV, semicolons, comma decimals, BOM", "unit": "kWh per 15 min",
+         "note": "grid meter, 3 register rows per timestamp; empty = no reading"},
+        {"source": "Weather (all sites)", "format": "CSV, 3 metadata rows then header", "unit": "various",
+         "note": "Open-Meteo; column order differs per site"},
+    ]), width="stretch", hide_index=True)
+    st.caption("All energy is normalized to kWh and joined per 15 minutes in the cleaning step (prep_data.py).")
+
+    st.subheader("What we know about the panels")
+    st.markdown(
+        "- **No panel brand, model or type** is in the data, only capacity (kWp), inverter size and array layout.\n"
+        "- The **EAN code** in the reactor file (`541454897100239158`) is a Belgian grid connection ID "
+        "(Fluvius), it identifies the metering point, not the panel.\n"
+        "- The houses have no EAN, their data comes from the inverter, not the grid meter."
+    )
+
+    st.subheader("Weather columns (the predictors)")
+    st.dataframe(pd.DataFrame([
+        {"column": "shortwave_radiation", "unit": "W/m²", "meaning": "global horizontal irradiance — main driver"},
+        {"column": "direct / diffuse / direct_normal", "unit": "W/m²", "meaning": "beam vs scattered components"},
+        {"column": "global_tilted_irradiance", "unit": "W/m²", "meaning": "irradiance on a tilted plane (panel-like)"},
+        {"column": "terrestrial_radiation", "unit": "W/m²", "meaning": "clear-sky theoretical maximum"},
+        {"column": "temperature_2m / humidity / dew_point", "unit": "°C / %", "meaning": "air conditions"},
+        {"column": "weather_code", "unit": "WMO", "meaning": "0 clear … 45 fog, 51-55 drizzle, 61-65 rain, 71-75 snow"},
+        {"column": "is_day", "unit": "0/1", "meaning": "daylight flag"},
+    ]), width="stretch", hide_index=True)
+
+
+def render_site(name: str):
+    info = SITE_INFO[name]
+    st.title(info["label"])
+    date_range, _ = filter_controls(f"site_{name}", with_sites=False)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Installed", f"{SITES[name]['kwp']} kWp",
+              help="Total DC capacity of the solar panels in kilowatt-peak (kWp) — the rated output under standard test conditions: 1000 W/m² irradiance, 25 °C panel temperature.")
+    c2.metric("Inverter", f"{info['inverter_kw']} kW",
+              help="Maximum AC power the inverter can export to the grid. The inverter converts DC from the panels to AC for household use.")
+    c3.metric("DC/AC ratio", f"{info['dcac']}",
+              help=f"Panel capacity ({SITES[name]['kwp']} kWp) divided by inverter capacity ({info['inverter_kw']} kW). "
+                   f"A ratio above 1.0 means the panels can produce more than the inverter can export — output is clipped on very sunny days. "
+                   f"This is intentional: sunny peak hours are short, so oversizing the panels increases total yield without needing a bigger inverter.")
+    orient = get_orientations().set_index("site").loc[name]
+    c4.metric("Orientation", orient["facing"],
+              help=f"Estimated from the daily output profile. Azimuth {orient['azimuth_deg']}° — 180° is due south, below 180° is east of south, above 180° is west of south.")
+    st.caption(info["arrays"])
+
+    daily = get_daily_energy(name)[lambda s: in_range(s.index, date_range)]
+    st.subheader("Daily output")
+    color = SITE_COLORS[name]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=daily.index, y=daily.values, name="Daily",
+        fill="tozeroy", mode="lines",
+        line=dict(color=color, width=1),
+        fillcolor=SITE_FILL[name],
+    ))
+    if len(daily) >= 7:
+        rolling = daily.rolling(7, center=True, min_periods=4).mean()
+        fig.add_trace(go.Scatter(
+            x=rolling.index, y=rolling.values, name="7-day avg",
+            mode="lines", line=dict(color=color, width=2.5, dash="dash"),
+        ))
+    fig.update_layout(height=380, title=f"{info['label']} daily energy", yaxis_title="Energy (kWh)",
+                      xaxis_title="Date", **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Average day shape")
+    profile = get_daily_profile(name)
+    fig = px.line(x=profile.index, y=profile.values, markers=True,
+                  labels={"x": "Hour of day (UTC)", "y": "Mean output (kWh / 15 min)"},
+                  color_discrete_sequence=[color])
+    fig.update_layout(height=340, **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Average over sunny days. The peak time reflects orientation: morning = east, midday = south, evening = west.")
+
+
+def page_house1():
+    render_site("house1")
+
+
+def page_house2():
+    render_site("house2")
+
+
+def page_reactor():
+    render_site("reactor")
+
+
+def page_compare():
+    st.title("Compare sites")
+    st.markdown("Pick what to compare across the three installations.")
+    date_range, selected_sites = filter_controls("compare")
+    view = st.selectbox(
+        "Compare by",
+        ["Specific yield (kWh/kWp)", "Output over time", "Average day shape", "Characteristics table"],
+    )
+
+    if view == "Characteristics table":
+        orient = get_orientations().set_index("site")
+        rows = []
+        for name in SITES:
+            daily = get_daily_energy(name)[lambda s: in_range(s.index, date_range)]
+            rows.append({
+                "site": SITE_INFO[name]["label"], "kWp": SITES[name]["kwp"],
+                "inverter (kW)": SITE_INFO[name]["inverter_kw"], "DC/AC": SITE_INFO[name]["dcac"],
+                "orientation": orient.loc[name, "facing"],
+                "mean daily kWh": round(daily.mean(), 1),
+                "mean kWh/kWp": round((daily / SITES[name]["kwp"]).mean(), 2),
+            })
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.caption("Specific yield (kWh/kWp) is the fair comparison: it removes the effect of installation size.")
+        return
+
+    if view == "Specific yield (kWh/kWp)":
+        fig = go.Figure()
+        for name in selected_sites:
+            daily = get_daily_energy(name)[lambda s: in_range(s.index, date_range)]
+            sy = (daily / SITES[name]["kwp"]).resample("MS").mean()
+            fig.add_trace(go.Bar(x=sy.index, y=sy.values, name=name, marker_color=SITE_COLORS[name]))
+        fig.update_layout(barmode="group", height=450, yaxis_title="Mean daily kWh/kWp",
+                          xaxis_title="Month", title="Specific yield per month (size-normalized)",
+                          **PLOTLY_LAYOUT)
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Same panel area would produce this per kWp. Removes the size advantage of the reactor.")
+        return
+
+    if view == "Output over time":
+        resolution = st.radio("Aggregation", list(RESAMPLE_RULES), horizontal=True, index=2, key="cmp_res")
+        fig = go.Figure()
+        for name in selected_sites:
+            agg = get_daily_energy(name)[lambda s: in_range(s.index, date_range)].resample(
+                RESAMPLE_RULES[resolution]).sum(min_count=1)
+            fig.add_trace(go.Scatter(x=agg.index, y=agg.values, name=name, line=dict(color=SITE_COLORS[name])))
+        fig.update_layout(height=450, yaxis_title="Energy (kWh)", xaxis_title="Date",
+                          title=f"{resolution} output per site", **PLOTLY_LAYOUT)
+        st.plotly_chart(fig, width="stretch")
+        return
+
+    # Average day shape
+    fig = go.Figure()
+    for name in selected_sites:
+        profile = get_daily_profile(name)
+        fig.add_trace(go.Scatter(x=profile.index, y=profile.values, name=name,
+                                 mode="lines+markers", line=dict(color=SITE_COLORS[name])))
+    fig.update_layout(height=450, xaxis_title="Hour of day (UTC)", yaxis_title="Mean output (kWh / 15 min)",
+                      title="Average day shape per site", **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+    st.caption("The peak time reveals orientation: reactor peaks near midday (south), the houses later (south-west).")
+
+
+def page_time_of_day():
+    st.title("Time of day")
+    st.markdown("How output is distributed across the day. Pick a site, or compare all of them.")
+    choice = st.selectbox("Site", ["All sites"] + [SITE_INFO[s]["label"] for s in SITES])
+
+    fig = go.Figure()
+    names = list(SITES) if choice == "All sites" else [s for s in SITES if SITE_INFO[s]["label"] == choice]
+    for name in names:
+        profile = get_daily_profile(name)
+        fig.add_trace(go.Scatter(x=profile.index, y=profile.values, name=SITE_INFO[name]["label"],
+                                 mode="lines+markers", line=dict(color=SITE_COLORS[name])))
+    fig.update_layout(height=460, xaxis_title="Hour of day (UTC)",
+                      yaxis_title="Mean output (kWh / 15 min)", title="Average output by hour of day",
+                      **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Averaged over sunny days. Times are UTC; local solar noon is around 12-13h UTC.")
+
+
+def page_weather():
+    st.title("Weather and output")
+    date_range, selected_sites = filter_controls("weather")
+
+    st.subheader("Irradiance vs output")
+    st.caption("Each point is one quarter-hour. Stronger sites track irradiance more tightly.")
+    site = st.selectbox("Site", selected_sites, key="weather_site")
+    df = get_joined(site)
+    df = df[in_range(df.index, date_range)]
+    corr = df["energy"].corr(df[RAD_COL]) if len(df) else float("nan")
+    st.metric("corr(energy, irradiance)", f"{corr:.3f}",
+              help=f"Pearson correlation between irradiance (W/m²) and energy output (kWh) per 15-min slot. "
+                   f"1.0 = perfect linear relationship, 0 = no relationship. Above 0.95 is expected for a well-functioning installation. "
+                   f"Calculated over {len(df):,} quarter-hours in the selected period.")
+    df_plot = df.copy()
+    df_plot["month"] = df_plot.index.month_name()
+    month_order = ["January", "February", "March", "April", "May", "June",
+                   "July", "August", "September", "October", "November", "December"]
+    df_plot["month"] = pd.Categorical(df_plot["month"], categories=month_order, ordered=True)
+    fig = px.scatter(df_plot, x=RAD_COL, y="energy", color="month", opacity=0.4,
+                     category_orders={"month": month_order},
+                     color_discrete_sequence=px.colors.cyclical.HSV,
+                     labels={"energy": "Energy per 15 min (kWh)", "month": "Month"})
+    fig.update_layout(height=450, **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Temperature effect at fixed irradiance")
+    st.caption("Irradiance band fixed to compare comparable light. The upward trend is a seasonal artefact (see below).")
+    band_low, band_high = st.slider("Irradiance band (W/m²)", 0, 1000, (400, 600), step=50, key="weather_band")
+    band = df[(df[RAD_COL] >= band_low) & (df[RAD_COL] <= band_high)].copy()
+    if len(band):
+        band["temp_bin"] = pd.cut(band[TEMP_COL], bins=[-10, 5, 10, 15, 20, 25, 30, 40])
+        grouped = band.groupby("temp_bin", observed=True)["energy_per_kwp"].mean().reset_index()
+        grouped["temp_bin"] = grouped["temp_bin"].astype(str)
+        fig = px.bar(grouped, x="temp_bin", y="energy_per_kwp",
+                     labels={"temp_bin": "Temperature (°C)", "energy_per_kwp": "Mean kWh/kWp per 15 min"},
+                     color_discrete_sequence=[SITE_COLORS[site]])
+        fig.update_layout(height=400, **PLOTLY_LAYOUT)
+        st.plotly_chart(fig, width="stretch")
+    else:
+        st.info("No data in this irradiance band for the selected period.")
+
+    st.info(
+        "**Why temperature seems to raise yield:** hotter panels are actually less efficient, but at "
+        "fixed irradiance, temperature still correlates with season/sun angle, so the trend is a "
+        "seasonal artefact, not a physical gain."
+    )
+
+
+def page_anomalies():
+    st.title("Underperforming days")
+    st.caption(
+        "Daily yield ratio = kWh/kWp output per W/m² of that day's total irradiance. "
+        "Days far below the site's own median are flagged."
+    )
+    date_range, selected_sites = filter_controls("anomalies")
+    col1, col2 = st.columns(2)
+    z_threshold = col1.slider("Anomaly threshold (z-score)", -3.0, -0.5, -1.5, step=0.1, key="anom_z",
+                              help="More negative = stricter, fewer days flagged.")
+    min_rad = col2.slider("Min daily irradiance (W/m²)", 0, 5000, 1000, step=250, key="anom_rad",
+                          help="Skip days too cloudy to judge fairly.")
+
+    fig = go.Figure()
+    all_anomalies = []
+    for name in selected_sites:
+        daily = get_yield_ratio(name, min_rad)[lambda d: in_range(d.index, date_range)]
+        anomalies = get_anomalies(name, z_threshold, min_rad)
+        anomalies = anomalies[in_range(anomalies.index, date_range)]
+        fig.add_trace(go.Scatter(x=daily.index, y=daily["ratio"], name=name,
+                                 line=dict(color=SITE_COLORS[name], width=1.5)))
+        if len(anomalies):
+            fig.add_trace(go.Scatter(
+                x=anomalies.index, y=anomalies["ratio"], mode="markers",
+                name=f"{name} anomaly", showlegend=False,
+                marker=dict(color="#e63946", size=10, symbol="x-open", line=dict(width=2.5, color="#e63946")),
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d}</b><br>"
+                    f"Site: {name}<br>"
+                    "Yield ratio: %{y:.4f}<br>"
+                    "z-score: %{customdata:.2f}<extra></extra>"
+                ),
+                customdata=anomalies["z_score"].values,
+            ))
+            tmp = anomalies[["ratio", "z_score"]].copy()
+            tmp.insert(0, "date", anomalies.index)
+            tmp.insert(0, "site", name)
+            all_anomalies.append(tmp.reset_index(drop=True))
+    fig.update_layout(yaxis_title="kWh/kWp per W/m²", xaxis_title="Date",
+                      title="Daily yield ratio with flagged days", height=450,
+                      **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+
+    if all_anomalies:
+        table = pd.concat(all_anomalies).sort_values("date")
+        st.subheader(f"{len(table)} flagged day-site combinations",
+                     help="Each row is one site on one day where the yield ratio fell far below that site's own median. "
+                          "Days flagged at multiple sites at once point to a shared weather cause rather than a local fault.")
+        st.dataframe(table, width="stretch", hide_index=True)
+    else:
+        st.info("No anomalies at these thresholds for the selected period.")
+
+    st.info(
+        "**The shared bad days were drizzle/fog, not snow.** Three days were flagged at every site at "
+        "once (2026-01-10, 2025-12-23, 2025-11-20). The WMO codes show drizzle, rain and fog with very "
+        "high humidity, a shared weather cause rather than a per-site fault."
+    )
+
+
+def page_ml_models():
+    st.title("Machine learning: models")
+    st.caption("How we predict PV output, which models we tried, and the reasoning behind the choices.")
+
+    st.subheader("Why per-site models: installations differ")
+    st.markdown(
+        "A model trained across sites could confuse hardware differences with weather/orientation. The "
+        "**DC/AC ratio** (panel kWp vs inverter kW) differs a lot, and a high ratio means the inverter "
+        "**clips** output at high irradiance, a per-site non-linearity from hardware alone."
+    )
+    st.markdown("**Clipping is visible in the data** — max output flattens once the inverter limit is hit:")
+    clip = get_clipping_curve()
+    fig = px.line(clip, x="irradiance", y="rel_max_output", color="site", markers=True,
+                  color_discrete_map=SITE_COLORS,
+                  labels={"irradiance": "Irradiance (W/m²)", "rel_max_output": "Max output (relative to peak)"})
+    fig.update_layout(height=380, **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Model comparison")
+    st.markdown(
+        "Three models, three ways of splitting the data. We rank on **time_split** (train on the past, "
+        "test on the newest period), the only honest split for time-series: a random split leaks "
+        "same-day quarters into both train and test."
+    )
+    results = get_ml_csv("results.csv")
+    res_q = results[(results["resolution"] == "quarterly") & (results["method"] == "time_split")]
+    fig = px.bar(res_q, x="site", y="r2", color="model", barmode="group",
+                 labels={"r2": "R² (time_split)", "site": ""},
+                 title="Quarterly model accuracy per site (higher is better)")
+    fig.update_layout(height=400, **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+    best = res_q.loc[res_q.groupby("site")["r2"].idxmax()]
+    cols = st.columns(len(best))
+    for col, (_, row) in zip(cols, best.iterrows()):
+        col.metric(f"{row['site']} best", row["model"],
+                   help=f"R² = {row['r2']:.3f} — share of variance explained (1.0 = perfect). "
+                        f"MAE = {row['mae_kwh']:.3f} kWh per 15-min slot — average absolute prediction error. "
+                        f"Evaluated on a time split: trained on older data, tested on the most recent period.")
+    st.caption("Forest wins on quarter-hourly data (non-linear); linear tends to win on smoother daily totals.")
+
+    st.subheader("General vs specific models")
+    st.markdown(
+        "Does a smaller, focused model do as well as the full one? `direction` (irradiance + hour of "
+        "day) is nearly as good as `general` with far fewer features, and `dir_season_temp` matches it."
+    )
+    combo = get_ml_csv("combo_results.csv")
+    pivot = combo.pivot(index="combo", columns="site", values="r2")
+    order = ["general", "direction", "dir_season", "dir_temp", "dir_season_temp", "core_hour"]
+    pivot = pivot.reindex([c for c in order if c in pivot.index])
+    pivot.insert(0, "n_features", combo.groupby("combo")["n_features"].first())
+    st.dataframe(pivot.style.format("{:.3f}", subset=list(SITES)), width="stretch")
+    st.caption(
+        "Surprises: irradiance alone is weak without the hour of day, and adding season hurts under a "
+        "time split. Temperature helps, it's a direct physical driver."
+    )
+
+    st.subheader("Inferred panel orientation")
+    st.markdown("Estimated from the daily output profile: east peaks in the morning, west in the evening, south at noon.")
+    orient = get_orientations()
+    st.dataframe(orient[["site", "peak_hour_utc", "centre_of_mass_hour", "azimuth_deg", "facing"]],
+                 width="stretch", hide_index=True)
+    st.caption("180° = due south, >180° = west of south. Reactor is near-south; the houses lean south-west.")
+
+
+def page_predict():
+    st.title("Try the prediction")
+    st.markdown(
+        "Compact models (irradiance + hour of day + temperature), one per site. "
+        "Adjust the sliders to see how conditions shape the predicted daily output curve."
+    )
+    c1, c2, c3 = st.columns(3)
+    irr = c1.slider("Irradiance (W/m²)", 0, 900, 500, step=25, key="pred_irr")
+    hour = c2.slider("Hour of day (UTC)", 0, 23, 12, key="pred_hour")
+    temp = c3.slider("Temperature (°C)", -5, 35, 18, key="pred_temp")
+
+    hours = list(range(24))
+    fig = go.Figure()
+    point_values = {}
+    for name in SITES:
+        preds = [predict_compact(name, irr, h, temp) for h in hours]
+        point_values[name] = preds[hour]
+        fig.add_trace(go.Scatter(
+            x=hours, y=preds, name=SITE_INFO[name]["label"],
+            mode="lines", line=dict(color=SITE_COLORS[name], width=2.5),
+            hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + "</extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=[hour], y=[preds[hour]], mode="markers",
+            marker=dict(color=SITE_COLORS[name], size=10, line=dict(width=2, color="white")),
+            showlegend=False, hoverinfo="skip",
+        ))
+
+    fig.add_vline(x=hour, line_dash="dot", line_color="rgba(100,100,100,0.4)")
+    fig.update_layout(
+        xaxis=dict(title="Hour of day (UTC)", tickmode="linear", tick0=0, dtick=2),
+        yaxis_title="Predicted output (kWh / 15 min)",
+        title=f"Predicted daily curve — {irr} W/m², {temp} °C",
+        height=460,
+        **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    metric_cols = st.columns(len(SITES))
+    for col, name in zip(metric_cols, SITES):
+        pred = point_values[name]
+        col.metric(
+            SITE_INFO[name]["label"],
+            f"{pred:.3f} kWh / 15 min",
+            help=f"≈ {pred * 4:.2f} kW instantaneous. {SITES[name]['kwp']} kWp installed.",
+        )
+    st.caption("Times are UTC — local solar noon is around 12–13h. The peak shifts with orientation: reactor peaks earlier (south), houses later (south-west).")
+
+    st.divider()
+    st.subheader("Irradiance sweep")
+    st.caption("Output vs sun strength at the hour and temperature set above. Watch each site's curve flatten where its inverter hits its limit.")
+    irr_range = list(range(0, 925, 25))
+    fig_sweep = go.Figure()
+    for name in SITES:
+        sweep = predict_sweep(name, hour, temp)
+        fig_sweep.add_trace(go.Scatter(
+            x=irr_range, y=sweep, name=SITE_INFO[name]["label"],
+            mode="lines", line=dict(color=SITE_COLORS[name], width=2.5),
+            hovertemplate="%{x} W/m² → %{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + "</extra>",
+        ))
+    fig_sweep.add_vline(x=irr, line_dash="dot", line_color="rgba(100,100,100,0.4)")
+    fig_sweep.update_layout(
+        xaxis_title="Irradiance (W/m²)",
+        yaxis_title="Predicted output (kWh / 15 min)",
+        title=f"Output vs irradiance — {hour}:00 UTC, {temp} °C",
+        height=400,
+        **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig_sweep, width="stretch")
+
+    st.divider()
+    st.subheader("Simulated full day")
+    st.caption("Pick a sky condition to generate a realistic irradiance profile. Temperature is taken from the slider above.")
+    day_type = st.selectbox("Sky condition", list(DAY_PROFILES), key="pred_day_type")
+    irr_prof = DAY_PROFILES[day_type]
+    hours_x = list(range(24))
+
+    fig_day = go.Figure()
+    fig_day.add_trace(go.Scatter(
+        x=hours_x, y=list(irr_prof), name="Irradiance profile",
+        mode="lines", fill="tozeroy",
+        line=dict(color="rgba(255,190,30,0.7)", width=1.5),
+        fillcolor="rgba(255,190,30,0.07)",
+        yaxis="y2",
+        hovertemplate="%{y:.0f} W/m²<extra>Irradiance</extra>",
+    ))
+    daily_totals = {}
+    for name in SITES:
+        preds = predict_day(name, irr_prof, temp)
+        daily_totals[name] = sum(preds) * 4
+        fig_day.add_trace(go.Scatter(
+            x=hours_x, y=preds, name=SITE_INFO[name]["label"],
+            mode="lines", line=dict(color=SITE_COLORS[name], width=2.5),
+            hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + "</extra>",
+        ))
+    fig_day.update_layout(
+        xaxis=dict(title="Hour of day (UTC)", tickmode="linear", tick0=0, dtick=2),
+        yaxis=dict(title="Predicted output (kWh / 15 min)"),
+        yaxis2=dict(title="Irradiance (W/m²)", overlaying="y", side="right", showgrid=False, range=[0, 1050]),
+        title=f"Simulated {day_type.lower()} — {temp} °C",
+        height=440,
+        **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig_day, width="stretch")
+
+    fig_totals = go.Figure()
+    for name in SITES:
+        fig_totals.add_trace(go.Bar(
+            x=[SITE_INFO[name]["label"]], y=[daily_totals[name]],
+            marker_color=SITE_COLORS[name], name=SITE_INFO[name]["label"],
+            text=[f"{daily_totals[name]:.1f} kWh"], textposition="outside",
+        ))
+    fig_totals.update_layout(
+        yaxis_title="Estimated daily output (kWh)",
+        title="Estimated total for the day",
+        showlegend=False,
+        height=340,
+        **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig_totals, width="stretch")
+
+
+def page_today():
+    today_str = date.today().isoformat()
+    st.title(f"Today — {today_str}")
+    st.markdown(
+        "Fetch today's weather from Open-Meteo (the same source as the training data) and run the "
+        "compact model for all three sites. If the dataset already contains today's actual output, "
+        "it is overlaid as a dashed line."
+    )
+
+    if st.button("Fetch today's weather", type="primary"):
+        with st.spinner("Fetching from Open-Meteo..."):
+            try:
+                irr, temp_vals = fetch_today_weather()
+                st.session_state["today_irr"] = irr
+                st.session_state["today_temp"] = temp_vals
+                st.session_state["today_date"] = today_str
+            except Exception as exc:
+                st.error(f"Could not fetch weather data: {exc}")
+
+    if "today_irr" not in st.session_state:
+        st.info("Press the button above to load today's weather and run the prediction.")
+        return
+
+    irr_profile = st.session_state["today_irr"]
+    temp_profile = st.session_state["today_temp"]
+    fetched_date = st.session_state["today_date"]
+    hours_x = list(range(24))
+
+    avg_temp = sum(temp_profile) / len(temp_profile)
+    peak_irr = max(irr_profile)
+    c1, c2 = st.columns(2)
+    c1.metric("Peak irradiance", f"{peak_irr:.0f} W/m²",
+              help="Highest hourly irradiance value today (W/m²). A clear summer day in Belgium peaks around 800-900 W/m²; an overcast day stays below 150 W/m².")
+    c2.metric("Avg temperature", f"{avg_temp:.1f} °C",
+              help="Average of today's 24 hourly temperature readings. Higher temperatures slightly reduce panel efficiency — roughly 0.4% per °C above 25 °C for typical silicon panels.")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=hours_x, y=list(irr_profile), name="Irradiance",
+        mode="lines", fill="tozeroy",
+        line=dict(color="rgba(255,190,30,0.7)", width=1.5),
+        fillcolor="rgba(255,190,30,0.07)",
+        yaxis="y2",
+        hovertemplate="%{y:.0f} W/m²<extra>Irradiance</extra>",
+    ))
+
+    daily_totals = {}
+    has_actual = False
+    for name in SITES:
+        preds = predict_day_hourly(name, irr_profile, temp_profile)
+        daily_totals[name] = sum(preds) * 4
+        fig.add_trace(go.Scatter(
+            x=hours_x, y=preds, name=SITE_INFO[name]["label"],
+            mode="lines", line=dict(color=SITE_COLORS[name], width=2.5),
+            hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + " predicted</extra>",
+        ))
+
+        try:
+            joined = get_joined(name)
+            mask = joined.index.strftime("%Y-%m-%d") == fetched_date
+            actual_today = joined.loc[mask, "energy"]
+            if not actual_today.empty:
+                actual_hourly = actual_today.resample("h").sum()
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(actual_hourly))), y=actual_hourly.values,
+                    name=f"{SITE_INFO[name]['label']} actual",
+                    mode="lines", line=dict(color=SITE_COLORS[name], width=2, dash="dash"),
+                    hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + " actual</extra>",
+                ))
+                has_actual = True
+        except Exception:
+            pass
+
+    fig.update_layout(
+        xaxis=dict(title="Hour of day (UTC)", tickmode="linear", tick0=0, dtick=2),
+        yaxis=dict(title="Output (kWh / 15 min)"),
+        yaxis2=dict(title="Irradiance (W/m²)", overlaying="y", side="right", showgrid=False, range=[0, 1050]),
+        title=f"Predicted output for {fetched_date}" + (" — solid = predicted, dashed = actual" if has_actual else ""),
+        height=480,
+        **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    if not has_actual:
+        st.caption("No actual output data found for today in the dataset — showing prediction only.")
+
+    fig_totals = go.Figure()
+    for name in SITES:
+        fig_totals.add_trace(go.Bar(
+            x=[SITE_INFO[name]["label"]], y=[daily_totals[name]],
+            marker_color=SITE_COLORS[name], showlegend=False,
+            text=[f"{daily_totals[name]:.1f} kWh"], textposition="outside",
+        ))
+    fig_totals.update_layout(
+        yaxis_title="Estimated daily output (kWh)",
+        title="Estimated total for today",
+        height=320,
+        **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig_totals, width="stretch")
+    st.caption(f"Source: Open-Meteo forecast API, lat=50.908 lon=3.248. Fetched for {fetched_date}.")
+
+
+# --- navigation -------------------------------------------------------------
+
+nav = st.navigation({
+    "Start": [
+        st.Page(page_overview, title="Overview", default=True),
+        st.Page(page_data_guide, title="Data guide"),
+    ],
+    "Sites": [
+        st.Page(page_house1, title="House 1"),
+        st.Page(page_house2, title="House 2"),
+        st.Page(page_reactor, title="Reactor"),
+        st.Page(page_compare, title="Compare"),
+    ],
+    "Analysis": [
+        st.Page(page_time_of_day, title="Time of day"),
+        st.Page(page_weather, title="Weather"),
+        st.Page(page_anomalies, title="Anomalies"),
+    ],
+    "Machine learning": [
+        st.Page(page_ml_models, title="Models"),
+        st.Page(page_predict, title="Predict"),
+        st.Page(page_today, title="Today"),
+    ],
+})
+nav.run()

@@ -1,0 +1,5 @@
+Reactor:
+
+22kW inverter
+array1 16,35kWp geinstalleerd vermogen.
+array2 16,35kWp geinstalleerd vermogen.

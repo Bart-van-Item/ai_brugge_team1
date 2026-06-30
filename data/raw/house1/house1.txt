@@ -1,0 +1,6 @@
+House1:
+
+4 kW inverter
+array1 4kWp geinstalleerd vermogen.
+array2 1,5kWp geinstalleerd vermogen.
+array3 0.75kWp geinstalleerd vermogen.
