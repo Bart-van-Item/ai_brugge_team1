@@ -304,7 +304,8 @@ def page_overview():
         )
 
     st.subheader("Energy output over time")
-    resolution = st.radio("Aggregation", list(RESAMPLE_RULES), horizontal=True, index=0, key="ov_res")
+    resolution = st.radio("Aggregation", list(RESAMPLE_RULES), horizontal=True, index=0, key="ov_res",
+                          help="How energy is summed before plotting: per day, per week, or per month. Coarser aggregation smooths out daily weather noise.")
     fig = go.Figure()
     for name in selected_sites:
         agg = get_daily_energy(name)[lambda s: in_range(s.index, date_range)].resample(
@@ -375,10 +376,12 @@ def render_site(name: str):
     c1.metric("Installed", f"{SITES[name]['kwp']} kWp",
               help="Total DC capacity of the solar panels in kilowatt-peak (kWp) — the rated output under standard test conditions: 1000 W/m² irradiance, 25 °C panel temperature.")
     c2.metric("Inverter", f"{info['inverter_kw']} kW",
-              help="Maximum AC power the inverter can export to the grid. The inverter converts DC from the panels to AC for household use.")
+              help="The inverter converts DC (direct current) from the panels into AC (alternating current) for household use and the grid. "
+                   "This is the maximum AC power it can export.")
     c3.metric("DC/AC ratio", f"{info['dcac']}",
-              help=f"Panel capacity ({SITES[name]['kwp']} kWp) divided by inverter capacity ({info['inverter_kw']} kW). "
-                   f"A ratio above 1.0 means the panels can produce more than the inverter can export — output is clipped on very sunny days. "
+              help=f"DC (direct current) is the power the solar panels generate; AC (alternating current) is what the inverter outputs to the grid and household. "
+                   f"The ratio is panel capacity ({SITES[name]['kwp']} kWp DC) divided by inverter capacity ({info['inverter_kw']} kW AC). "
+                   f"Above 1.0 means the panels can produce more than the inverter can export, so output is clipped on very sunny days. "
                    f"This is intentional: sunny peak hours are short, so oversizing the panels increases total yield without needing a bigger inverter.")
     orient = get_orientations().set_index("site").loc[name]
     c4.metric("Orientation", orient["facing"],
@@ -386,7 +389,8 @@ def render_site(name: str):
     st.caption(info["arrays"])
 
     daily = get_daily_energy(name)[lambda s: in_range(s.index, date_range)]
-    st.subheader("Daily output")
+    st.subheader("Daily output",
+                 help="Total energy produced each day (kWh). The dashed line is a centered 7-day average that smooths out day-to-day weather swings.")
     color = SITE_COLORS[name]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -405,7 +409,8 @@ def render_site(name: str):
                       xaxis_title="Date", **PLOTLY_LAYOUT)
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Average day shape")
+    st.subheader("Average day shape",
+                 help="Mean output per 15-min slot across sunny days, showing the typical shape of a production day. The peak hour reveals orientation: morning peak = east-facing, midday = south, evening = west.")
     profile = get_daily_profile(name)
     fig = px.line(x=profile.index, y=profile.values, markers=True,
                   labels={"x": "Hour of day (UTC)", "y": "Mean output (kWh / 15 min)"},
@@ -511,7 +516,8 @@ def page_weather():
     st.title("Weather and output")
     date_range, selected_sites = filter_controls("weather")
 
-    st.subheader("Irradiance vs output")
+    st.subheader("Irradiance vs output",
+                 help="Irradiance is the solar power hitting the ground (W/m²), the main driver of PV output. A tight, straight cloud of points means output follows the sun closely, as expected from a healthy installation.")
     st.caption("Each point is one quarter-hour. Stronger sites track irradiance more tightly.")
     site = st.selectbox("Site", selected_sites, key="weather_site")
     df = get_joined(site)
@@ -535,7 +541,8 @@ def page_weather():
 
     st.subheader("Temperature effect at fixed irradiance")
     st.caption("Irradiance band fixed to compare comparable light. The upward trend is a seasonal artefact (see below).")
-    band_low, band_high = st.slider("Irradiance band (W/m²)", 0, 1000, (400, 600), step=50, key="weather_band")
+    band_low, band_high = st.slider("Irradiance band (W/m²)", 0, 1000, (400, 600), step=50, key="weather_band",
+                                    help="Only compare quarter-hours with roughly equal sunlight. Fixing the light level isolates the temperature effect from the effect of how bright it is.")
     band = df[(df[RAD_COL] >= band_low) & (df[RAD_COL] <= band_high)].copy()
     if len(band):
         band["temp_bin"] = pd.cut(band[TEMP_COL], bins=[-10, 5, 10, 15, 20, 25, 30, 40])
