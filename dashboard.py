@@ -439,6 +439,8 @@ def page_compare():
     view = st.selectbox(
         "Compare by",
         ["Specific yield (kWh/kWp)", "Output over time", "Average day shape", "Characteristics table"],
+        help="Specific yield (kWh/kWp) is energy output divided by installed panel capacity. "
+             "It is the fair way to compare installations of different sizes: it answers how much each site produces per unit of panel, not in total.",
     )
 
     if view == "Characteristics table":
@@ -629,7 +631,9 @@ def page_ml_models():
     st.title("Machine learning: models")
     st.caption("How we predict PV output, which models we tried, and the reasoning behind the choices.")
 
-    st.subheader("Why per-site models: installations differ")
+    st.subheader("Why per-site models: installations differ",
+                 help="Clipping is when the panels generate more power than the inverter can convert, so the inverter caps the output. "
+                      "This shows up as the output curve flattening at high irradiance, and it happens at a different point for each site, so one shared model would misread it.")
     st.markdown(
         "A model trained across sites could confuse hardware differences with weather/orientation. The "
         "**DC/AC ratio** (panel kWp vs inverter kW) differs a lot, and a high ratio means the inverter "
@@ -643,7 +647,10 @@ def page_ml_models():
     fig.update_layout(height=380, **PLOTLY_LAYOUT)
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Model comparison")
+    st.subheader("Model comparison",
+                 help="R² (0 to 1) is how much of the output the model explains: 1.0 is perfect, 0 is no better than guessing the average. "
+                      "time_split means the model is trained on older data and tested on the newest period, the honest test for time-series. "
+                      "A random split would let the model peek at same-day values during training and look better than it really is.")
     st.markdown(
         "Three models, three ways of splitting the data. We rank on **time_split** (train on the past, "
         "test on the newest period), the only honest split for time-series: a random split leaks "
@@ -665,7 +672,9 @@ def page_ml_models():
                         f"Evaluated on a time split: trained on older data, tested on the most recent period.")
     st.caption("Forest wins on quarter-hourly data (non-linear); linear tends to win on smoother daily totals.")
 
-    st.subheader("General vs specific models")
+    st.subheader("General vs specific models",
+                 help="A feature is an input the model uses to predict output, such as irradiance, hour of day or temperature. "
+                      "n_features is how many inputs each variant uses. The question here is whether a small set of well-chosen features predicts as well as the full set.")
     st.markdown(
         "Does a smaller, focused model do as well as the full one? `direction` (irradiance + hour of "
         "day) is nearly as good as `general` with far fewer features, and `dir_season_temp` matches it."
