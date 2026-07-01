@@ -572,9 +572,12 @@ def page_anomalies():
     date_range, selected_sites = filter_controls("anomalies")
     col1, col2 = st.columns(2)
     z_threshold = col1.slider("Anomaly threshold (z-score)", -3.0, -0.5, -1.5, step=0.1, key="anom_z",
-                              help="More negative = stricter, fewer days flagged.")
+                              help="A z-score measures how far a day sits from the site's own average, counted in standard deviations. "
+                                   "0 is an average day, -1 is one standard deviation below average, -2 is well below. "
+                                   "A day is flagged when its yield ratio falls below this threshold, so a more negative value is stricter and flags fewer days.")
     min_rad = col2.slider("Min daily irradiance (W/m²)", 0, 5000, 1000, step=250, key="anom_rad",
-                          help="Skip days too cloudy to judge fairly.")
+                          help="Daily irradiance is the total sunlight energy that reached the panels that day, summed over all quarter-hours. "
+                               "Days below this level were too dark or cloudy to judge output fairly, so they are skipped. Raise it to only compare bright days.")
 
     fig = go.Figure()
     all_anomalies = []
