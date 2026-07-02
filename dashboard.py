@@ -204,6 +204,66 @@ def fetch_today_weather() -> tuple:
     return irr, temp
 
 
+def fetch_week_weather(days: int = 7) -> dict:
+    """Fetch the next `days` days from Open-Meteo. Returns a dict with per-day
+    hourly irradiance/temperature (24-value tuples, for the model) plus a daily
+    summary (weather code, min/max temperature) for the forecast cards."""
+    resp = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": 50.908,
+            "longitude": 3.248,
+            "hourly": "shortwave_radiation,temperature_2m",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+            "timezone": "GMT",
+            "forecast_days": days,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    times = data["hourly"]["time"]
+    irr = [float(v) for v in data["hourly"]["shortwave_radiation"]]
+    temp = [float(v) for v in data["hourly"]["temperature_2m"]]
+    daily = data["daily"]
+
+    dates, irr_by_day, temp_by_day = [], [], []
+    for d in range(days):
+        lo, hi = d * 24, d * 24 + 24
+        if hi > len(irr):
+            break
+        dates.append(times[lo][:10])
+        irr_by_day.append(tuple(irr[lo:hi]))
+        temp_by_day.append(tuple(temp[lo:hi]))
+
+    n = len(dates)
+    return {
+        "dates": dates,
+        "irr_by_day": irr_by_day,
+        "temp_by_day": temp_by_day,
+        "code": [int(c) for c in daily["weather_code"][:n]],
+        "temp_max": [float(v) for v in daily["temperature_2m_max"][:n]],
+        "temp_min": [float(v) for v in daily["temperature_2m_min"][:n]],
+    }
+
+
+# WMO code -> (emoji, short label) for the forecast cards
+WMO_ICONS = {
+    0: ("☀️", "Clear"), 1: ("🌤️", "Mainly clear"), 2: ("⛅", "Partly cloudy"), 3: ("☁️", "Overcast"),
+    45: ("🌫️", "Fog"), 48: ("🌫️", "Rime fog"),
+    51: ("🌦️", "Light drizzle"), 53: ("🌦️", "Drizzle"), 55: ("🌧️", "Dense drizzle"),
+    61: ("🌦️", "Slight rain"), 63: ("🌧️", "Rain"), 65: ("🌧️", "Heavy rain"),
+    71: ("🌨️", "Slight snow"), 73: ("🌨️", "Snow"), 75: ("❄️", "Heavy snow"),
+    80: ("🌦️", "Showers"), 81: ("🌧️", "Showers"), 82: ("⛈️", "Violent showers"),
+    95: ("⛈️", "Thunderstorm"),
+}
+
+
+def weather_icon(code: int) -> tuple:
+    """Emoji and label for a WMO code, falling back to the nearest known bucket."""
+    return WMO_ICONS.get(code, ("🌡️", WMO_LABELS.get(code, f"Code {code}")))
+
+
 @st.cache_data
 def predict_day(site_name: str, irr_profile: tuple, temp: float) -> list:
     """Predicted output for each of 24 hours given an irradiance profile."""
@@ -923,6 +983,109 @@ def page_today():
     st.caption(f"Source: Open-Meteo forecast API, lat=50.908 lon=3.248. Fetched for {fetched_date}.")
 
 
+def page_this_week():
+    st.title("This week")
+    st.markdown(
+        "Fetch the 7-day weather forecast from Open-Meteo and run the compact model for all three "
+        "sites. Shows the estimated daily total per day and the full hourly output curve across the week."
+    )
+
+    if st.button("Fetch 7-day forecast", type="primary"):
+        with st.spinner("Fetching from Open-Meteo..."):
+            try:
+                st.session_state["week"] = fetch_week_weather()
+            except Exception as exc:
+                st.error(f"Could not fetch weather data: {exc}")
+
+    if "week" not in st.session_state:
+        st.info("Press the button above to load the 7-day forecast and run the prediction.")
+        return
+
+    week = st.session_state["week"]
+    dates = week["dates"]
+    irr_by_day = week["irr_by_day"]
+    temp_by_day = week["temp_by_day"]
+
+    # weather outlook: one card per day, before the graphs
+    st.subheader("Weather outlook")
+    day_cols = st.columns(len(dates))
+    for col, i in zip(day_cols, range(len(dates))):
+        icon, label = weather_icon(week["code"][i])
+        weekday = pd.Timestamp(dates[i]).strftime("%a")
+        col.markdown(
+            f"<div style='text-align:center'>"
+            f"<div style='font-weight:600'>{weekday}</div>"
+            f"<div style='font-size:2rem;line-height:2.4rem'>{icon}</div>"
+            f"<div style='font-size:0.8rem;color:#666'>{label}</div>"
+            f"<div style='font-size:0.85rem'>{week['temp_max'][i]:.0f}° / {week['temp_min'][i]:.0f}°</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    st.divider()
+
+    # daily total per site: sum of 15-min predictions (kWh/15min x4 per hour value)
+    daily_totals = {name: [] for name in SITES}
+    for day_idx in range(len(dates)):
+        for name in SITES:
+            preds = predict_day_hourly(name, irr_by_day[day_idx], temp_by_day[day_idx])
+            daily_totals[name].append(sum(preds) * 4)
+
+    week_total = {name: sum(vals) for name, vals in daily_totals.items()}
+    cols = st.columns(len(SITES))
+    for col, name in zip(cols, SITES):
+        col.metric(
+            f"{SITE_INFO[name]['label']} — 7-day total",
+            f"{week_total[name]:,.0f} kWh",
+            help=f"Sum of the estimated daily output over the {len(dates)} forecast days. {SITES[name]['kwp']} kWp installed.",
+        )
+
+    st.subheader("Estimated daily output",
+                 help="Predicted total energy per day for each site, from the forecast irradiance and temperature. Weekends and weekdays are not distinguished; only the weather matters.")
+    fig_daily = go.Figure()
+    for name in SITES:
+        fig_daily.add_trace(go.Bar(
+            x=dates, y=daily_totals[name], name=SITE_INFO[name]["label"],
+            marker_color=SITE_COLORS[name],
+            hovertemplate="%{x}<br>%{y:.1f} kWh<extra>" + SITE_INFO[name]["label"] + "</extra>",
+        ))
+    fig_daily.update_layout(
+        barmode="group", height=420, yaxis_title="Estimated output (kWh)",
+        xaxis_title="Date", title="Estimated daily output this week", **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig_daily, width="stretch")
+
+    st.subheader("Hourly output across the week",
+                 help="The full predicted output curve, hour by hour, over all forecast days. Each daily bump is one production day; overcast days stay low.")
+    hours_x = list(range(24 * len(dates)))
+    fig_hourly = go.Figure()
+    all_irr = [v for day in irr_by_day for v in day]
+    fig_hourly.add_trace(go.Scatter(
+        x=hours_x, y=all_irr, name="Irradiance",
+        mode="lines", fill="tozeroy",
+        line=dict(color="rgba(255,190,30,0.7)", width=1),
+        fillcolor="rgba(255,190,30,0.07)", yaxis="y2",
+        hovertemplate="%{y:.0f} W/m²<extra>Irradiance</extra>",
+    ))
+    for name in SITES:
+        preds = [p for day_idx in range(len(dates))
+                 for p in predict_day_hourly(name, irr_by_day[day_idx], temp_by_day[day_idx])]
+        fig_hourly.add_trace(go.Scatter(
+            x=hours_x, y=preds, name=SITE_INFO[name]["label"],
+            mode="lines", line=dict(color=SITE_COLORS[name], width=2),
+            hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + "</extra>",
+        ))
+    # one tick per day at midday
+    tickvals = [d * 24 + 12 for d in range(len(dates))]
+    fig_hourly.update_layout(
+        xaxis=dict(title="Day", tickmode="array", tickvals=tickvals, ticktext=dates),
+        yaxis=dict(title="Output (kWh / 15 min)"),
+        yaxis2=dict(title="Irradiance (W/m²)", overlaying="y", side="right", showgrid=False, range=[0, 1050]),
+        title="Predicted hourly output this week", height=460, **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig_hourly, width="stretch")
+    st.caption(f"Source: Open-Meteo forecast API, lat=50.908 lon=3.248. Forecast for {dates[0]} to {dates[-1]}.")
+
+
 # --- navigation -------------------------------------------------------------
 
 nav = st.navigation({
@@ -945,6 +1108,7 @@ nav = st.navigation({
         st.Page(page_ml_models, title="Models"),
         st.Page(page_predict, title="Predict"),
         st.Page(page_today, title="Today"),
+        st.Page(page_this_week, title="This week"),
     ],
 })
 nav.run()
