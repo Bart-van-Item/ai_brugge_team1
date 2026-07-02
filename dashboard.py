@@ -67,6 +67,27 @@ def get_daily_energy(site_name: str) -> pd.Series:
     return daily_energy(site_name)
 
 
+ALL_MONTHS = list(range(1, 13))
+MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+@st.cache_data
+def get_coverage(site_name: str) -> dict:
+    """Data span and which calendar months this site has ever recorded, so the
+    site page can flag that predictions for unseen months are extrapolation."""
+    daily = get_daily_energy(site_name).dropna()
+    seen = sorted(set(daily.index.month))
+    missing = [m for m in ALL_MONTHS if m not in seen]
+    return {
+        "start": daily.index.min().date(),
+        "end": daily.index.max().date(),
+        "days": len(daily),
+        "seen_months": seen,
+        "missing_months": missing,
+    }
+
+
 @st.cache_data
 def get_joined(site_name: str) -> pd.DataFrame:
     return joined_data(site_name)
@@ -447,6 +468,20 @@ def render_site(name: str):
     c4.metric("Orientation", orient["facing"],
               help=f"Estimated from the daily output profile. Azimuth {orient['azimuth_deg']}° — 180° is due south, below 180° is east of south, above 180° is west of south.")
     st.caption(info["arrays"])
+
+    cov = get_coverage(name)
+    span_note = (f"Data coverage: {cov['start']} to {cov['end']} "
+                 f"({cov['days']} days).")
+    if cov["missing_months"]:
+        missing = ", ".join(MONTH_ABBR[m - 1] for m in cov["missing_months"])
+        st.info(
+            f"{span_note} This site has no data yet for: **{missing}**. "
+            "Model predictions for those months are extrapolation, based on "
+            "irradiance rather than direct experience of that season.",
+            icon="ℹ️",
+        )
+    else:
+        st.caption(f"{span_note} Full calendar year covered.")
 
     daily = get_daily_energy(name)[lambda s: in_range(s.index, date_range)]
     st.subheader("Daily output",
