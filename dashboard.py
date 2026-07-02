@@ -297,6 +297,36 @@ def predict_forecast(site_name: str, hourly: pd.DataFrame) -> pd.Series:
     return pred.reindex(grid.index, fill_value=0.0)
 
 
+@st.cache_data
+def get_day_backtest(site_name: str, day) -> dict | None:
+    """Predicted vs actual 15-min series for one historical day, from the site's
+    best model on that day's recorded weather. None if the site has no output
+    data on that day."""
+    from features import load_clean, build_forecast_features, TARGET
+
+    df = load_clean(site_name, "quarterly")
+    day_start = pd.Timestamp(day)
+    day_end = day_start + pd.Timedelta(days=1) - pd.Timedelta(minutes=15)
+    day_rows = df.loc[day_start:day_end]
+    # require at least one real reading; night fill alone would fake an all-zero day
+    if day_rows.empty or day_rows[TARGET].notna().sum() == 0:
+        return None
+
+    actual = day_rows[TARGET].copy()
+    night_gap = (day_rows["is_day ()"] == 0) & actual.isna()
+    actual[night_gap] = 0.0  # unreported night quarters are zero, same rule as training
+
+    # 2-hour warm-up before midnight so the lag features are defined at 00:00
+    window = df.loc[day_start - pd.Timedelta(hours=2):day_end]
+    X = build_forecast_features(window.drop(columns=[TARGET]))
+    pred = _forecast_model(site_name).predict(X)
+    pred = pd.Series([_clip_pred(site_name, p) for p in pred], index=X.index)
+    pred = pred.reindex(day_rows.index, fill_value=0.0)
+
+    return {"actual": actual, "pred": pred,
+            "irr": day_rows["shortwave_radiation (W/m²)"]}
+
+
 # WMO code -> (emoji, short label) for the forecast cards
 WMO_ICONS = {
     0: ("☀️", "Clear"), 1: ("🌤️", "Mainly clear"), 2: ("⛅", "Partly cloudy"), 3: ("☁️", "Overcast"),
@@ -1267,6 +1297,81 @@ def page_this_week():
     st.caption(f"{OPEN_METEO_CREDIT} Forecast for {dates[0]} to {dates[-1]}.")
 
 
+def page_replay():
+    st.title("Replay a day")
+    st.markdown(
+        "Pick any day in the dataset. Each site's **best model** predicts that day from its recorded "
+        "weather, so you can compare the prediction against what the panels actually produced."
+    )
+    day = st.date_input("Day", value=MAX_DATE, min_value=MIN_DATE, max_value=MAX_DATE, key="replay_day")
+
+    fig = go.Figure()
+    rows, irr_added = [], False
+    for name in SITES:
+        data = get_day_backtest(name, day)
+        if data is None:
+            st.info(f"No output data for {SITE_INFO[name]['label']} on {day}.", icon="ℹ️")
+            continue
+        pred, actual = data["pred"], data["actual"]
+        hours = pred.index.hour + pred.index.minute / 60
+
+        if not irr_added:  # weather is near-identical across the sites, one curve suffices
+            fig.add_trace(go.Scatter(
+                x=hours, y=data["irr"].values, name="Irradiance",
+                mode="lines", fill="tozeroy", yaxis="y2",
+                line=dict(color="rgba(255,190,30,0.7)", width=1.5),
+                fillcolor="rgba(255,190,30,0.07)",
+                hovertemplate="%{y:.0f} W/m²<extra>Irradiance</extra>",
+            ))
+            irr_added = True
+        fig.add_trace(go.Scatter(
+            x=hours, y=pred.values, name=SITE_INFO[name]["label"], legendgroup=name,
+            mode="lines", line=dict(color=SITE_COLORS[name], width=2.5),
+            hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + " predicted</extra>",
+        ))
+        known = actual.notna()
+        fig.add_trace(go.Scatter(
+            x=hours[known], y=actual[known].values, name=f"{SITE_INFO[name]['label']} actual",
+            legendgroup=name, showlegend=False,
+            mode="lines", line=dict(color=SITE_COLORS[name], width=2, dash="dash"),
+            hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + " actual</extra>",
+        ))
+
+        # totals over the quarters with a known actual, so logging gaps stay fair
+        act_total = actual[known].sum()
+        pred_total = pred[known].sum()
+        error = pred_total - act_total
+        rows.append({
+            "site": f"{SITE_DOT[name]} {SITE_INFO[name]['label']}",
+            "actual (kWh)": round(act_total, 2),
+            "predicted (kWh)": round(pred_total, 2),
+            "error (kWh)": round(error, 2),
+            "error (%)": round(error / act_total * 100, 1) if act_total else None,
+            "missing quarters": int((~known).sum()),
+        })
+
+    if not rows:
+        return
+    fig.update_layout(
+        xaxis=dict(title="Hour of day (UTC)", tickmode="linear", tick0=0, dtick=2),
+        yaxis=dict(title="Output (kWh / 15 min)"),
+        yaxis2=dict(title="Irradiance (W/m²)", overlaying="y", side="right", showgrid=False, range=[0, 1050]),
+        title=f"Predicted vs actual output for {day} — solid = predicted, dashed = actual",
+        height=480, **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Day totals",
+                 help="Totals are summed over the quarters where the site actually reported a reading "
+                      "(plus nights, which count as 0), so logging gaps do not inflate the prediction.")
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.caption(
+        "Note: the models are trained on the full history, including this day. This shows how well "
+        "the model reproduces a day from its weather, not a blind forecast; for honest held-out "
+        "accuracy see the Models page."
+    )
+
+
 # --- navigation -------------------------------------------------------------
 
 nav = st.navigation({
@@ -1290,6 +1395,7 @@ nav = st.navigation({
         st.Page(page_predict, title="Predict"),
         st.Page(page_today, title="Today"),
         st.Page(page_this_week, title="This week"),
+        st.Page(page_replay, title="Replay a day"),
     ],
 }, expanded=True)  # always show all pages, no "View more" collapse
 st.sidebar.caption("Per-15-min PV & weather · Bruges region · since Jan 2025 · "

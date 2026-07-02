@@ -23,6 +23,8 @@ Sidebar groups and their pages (in order):
 | Machine learning | Models | `page_ml_models` |
 | Machine learning | Predict | `page_predict` |
 | Machine learning | Today | `page_today` |
+| Machine learning | This week | `page_this_week` |
+| Machine learning | Replay a day | `page_replay` |
 
 Every page except Data guide and Today shows a collapsible **Filters** expander
 (`filter_controls`): a date-range slider, and on most pages a site multiselect.
@@ -113,6 +115,15 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 - Weather outlook cards (icon, label, min/max temperature per day).
 - Runs each site's best model on the 15-min grid: 7-day totals, daily bar chart,
   and the predicted 15-min output curve across the week.
+
+**Replay a day** (`page_replay`)
+- Date picker over the dataset range; runs each site's best model on that day's
+  recorded weather (`get_day_backtest`).
+- Chart of predicted (solid) vs actual (dashed) 15-min output plus irradiance.
+- Day-totals table: actual, predicted, error in kWh and %, missing quarters.
+  Totals only cover quarters with a known actual, so logging gaps stay fair.
+- Caveat shown on the page: models are trained on the full history including the
+  chosen day, so this is a reproduction check, not a blind forecast.
 
 ## Functions
 
