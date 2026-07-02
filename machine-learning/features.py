@@ -2,8 +2,19 @@
 Feature engineering for the PV forecasting models.
 
 Builds an (X, y) feature matrix from a site's cleaned quarterly or daily CSV:
-- X: weather columns + cyclical time features (hour, month, day-of-year)
+- X: weather columns + clear-sky index + cyclical time features
 - y: energy_kwh
+
+Target handling (quarterly): the houses' PV loggers do not report at night, so
+those quarters are missing rather than zero. A panel at night produces exactly
+0, so missing night quarters (is_day == 0) are filled with 0 instead of being
+dropped. This roughly doubles the usable rows and teaches the model that nights
+are zero, which the forecast pages rely on. Missing daytime quarters stay NaN:
+for house1 a large share of them are real logging outages at productive hours,
+so zero-filling those would inject false zeros.
+
+The clear-sky index (shortwave / terrestrial radiation) tells the model "how
+cloudy" independent of season and hour, a small but consistent gain.
 
 Time features are encoded as sin/cos pairs so the model sees that e.g. hour 23
 and hour 0 are adjacent, and December and January are adjacent.
@@ -54,6 +65,15 @@ LEAN_WEATHER = [
     "temperature_2m (°C)",
     "is_day ()",
 ]
+
+# Inverter AC capacity per site (kW). The inverter caps output, so a quarterly
+# prediction can never exceed kW * 0.25 kWh; used to clip predictions.
+INVERTER_KW = {"house1": 4.0, "house2": 2.2, "reactor": 22.0}
+
+
+def quarter_cap_kwh(site_name: str) -> float:
+    return INVERTER_KW[site_name] * 0.25
+
 
 # Base irradiance signal used for lag/rolling features.
 LAG_BASE = "shortwave_radiation (W/m²)"
@@ -109,6 +129,11 @@ def build_features(site_name: str, resolution: str, feature_set: str = "all",
     daily gets month + day-of-year (no hour)."""
     df = load_clean(site_name, resolution)
 
+    # nights produce exactly 0; fill unreported night quarters instead of dropping
+    if resolution == "quarterly":
+        night_gap = (df["is_day ()"] == 0) & df[TARGET].isna()
+        df.loc[night_gap, TARGET] = 0.0
+
     if feature_set == "all":
         weather_cols = [c for c in WEATHER_FEATURES if c in df.columns]
     elif feature_set == "fair":
@@ -119,6 +144,13 @@ def build_features(site_name: str, resolution: str, feature_set: str = "all",
         raise ValueError(feature_set)
 
     X = df[weather_cols].copy()
+
+    # clear-sky index: measured irradiance vs the theoretical (cloudless) maximum,
+    # i.e. "how cloudy", independent of season and hour. 0 at night by definition.
+    terrestrial = df["terrestrial_radiation (W/m²)"]
+    X["clearsky_index"] = (
+        (df[LAG_BASE] / terrestrial.where(terrestrial > 10)).clip(0, 1.5).fillna(0.0)
+    )
 
     # lag features are computed on the full grid before dropping NaN energy rows
     if add_lags:

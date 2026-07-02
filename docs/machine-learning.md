@@ -29,7 +29,7 @@ Why this affects the model:
 - That clipping is a per-site non-linearity caused by hardware, not by weather or orientation.
   A single cross-site model would mistake it for something else.
 - house1 has three differently-sized arrays across two directions -- the most mixed profile,
-  which is why it is the hardest to predict (R² ~0.62 vs reactor 0.87).
+  which is why it is the hardest to predict (R² 0.75 vs reactor 0.86 after the target fixes below).
 - The EAN code in the reactor file (541454897100239158) is a Belgian grid connection ID
   (Fluvius/Flanders), identifying the metering point, not the panel type.
 
@@ -48,18 +48,76 @@ ideally, account for the DC/AC clipping, or at least flag it as a known limitati
 
 ## Models tried (per-site track)
 
+- physics (single-feature linear fit on horizontal irradiance) -- the floor to beat
 - linear (LinearRegression) -- benchmark, fully interpretable
 - forest (RandomForestRegressor) -- robust, non-linear, no scaling needed
 - boosting (HistGradientBoostingRegressor) -- often most accurate
 
 Each was evaluated three ways, because this is time-series data:
 - time_split -- train oldest 80%, test newest 20% (realistic, no leakage) -> we rank on this
-- random -- random 80/20 (looks better but leaks: same-day quarters in train and test)
+- random -- random 80/20 (looks better but leaks: same-day quarters in train and test).
+  For daily scores the random split is over whole days, so a day's quarters never straddle
+  train and test.
 - ts_cv -- TimeSeriesSplit 5-fold (robust, but early folds have little data -> can go negative)
 
-Best per site+resolution (time_split R²): forest wins on quarterly (house2 0.77, reactor 0.87),
-linear wins on daily (fewer, smoother samples where trees overfit). Lag features lift quarterly
-forest to ~0.87 (house2) and ~0.92 (reactor), but only apply to the forecasting track.
+All models train on quarterly (15-min) data only. Daily figures come from summing the
+quarterly model's predictions per calendar day; see the next section for why. The feature
+variant reported per model is chosen by ts_cv R² (choosing by the test score itself was mild
+selection-on-test leakage), and predictions are clipped to [0, inverter capacity].
+
+## Target handling: the fixes that mattered (July 2026)
+
+An audit of the training data revealed that the biggest accuracy problems were in the target,
+not the models. Three changes were validated on the honest time split and adopted:
+
+1. **Missing night quarters are filled with 0** (`features.py`). The houses' PV loggers do not
+   report at night, so roughly half of all quarters had no reading and were dropped. A panel at
+   night produces exactly 0, so those rows are free, perfectly-labeled training data. This
+   roughly doubles the usable rows and teaches the model that nights are zero, which the
+   forecast pages depend on. Missing *daytime* quarters stay excluded: house2's daytime gaps sit
+   at median 25 W/m² (inverter asleep at dawn/dusk), but house1's sit at median 91 / mean
+   183 W/m², i.e. real logging outages at productive hours. Zero-filling those was tested and
+   made house1 clearly worse (daily R² 0.58 -> 0.37), so it was rejected.
+2. **Clear-sky index feature** (`shortwave_radiation / terrestrial_radiation`, clipped to
+   [0, 1.5], 0 at night). It expresses "how cloudy" as one number, independent of season and
+   hour. Small but consistent gain on every site.
+3. **Daily = aggregated quarterly.** The standalone daily models had only 196-534 samples and
+   lost to summing the quarterly model's predictions per day nearly everywhere (reactor daily
+   R² 0.32 -> 0.81). They were removed; `results.csv` daily rows now score the aggregation.
+   Note the daily targets themselves are slightly undercounted for the houses (median daytime
+   coverage ~90% due to logging gaps), so daily metrics reward matching an imperfect total.
+4. **Physical clipping.** Predictions are clipped to the inverter capacity (kW x 0.25 = kWh per
+   quarter): house1 1.0, house2 0.55, reactor 5.5 kWh. house1 clips for real -- ~5% of its
+   readings sit at >=98% of the cap (6.25 kWp on a 4 kW inverter), which is also why purely
+   linear models overshoot its sunny middays.
+
+Validated effect (boosting, time_split R², before -> after):
+
+| resolution | house1 | house2 | reactor |
+|------------|--------------|--------------|--------------|
+| 15-min     | 0.60 -> 0.75 | 0.78 -> 0.84 | 0.86 -> 0.86 |
+| daily      | 0.49 -> 0.58 | 0.69 -> 0.77 | 0.32 -> 0.81 |
+
+The reactor's 15-min score is flat because its meter already records nights, so the night fill
+adds nothing there. Linear regression gained even more than boosting from the fixes: on the
+fair_lag variant it now leads house1 (quarterly 0.78, daily 0.69) -- with nights filled and the
+clear-sky index the relationship is close to linear, and the inverter-cap clip patches its one
+blind spot. The best model per site (ts_cv): house1 linear, house2 forest, reactor boosting,
+all on fair_lag.
+
+The theme/combination experiment tables below predate these fixes, so their absolute scores run
+lower; the relative comparisons (which features matter) still hold and are what drove the
+feature choices.
+
+Also tested, **not** adopted:
+- Zero-filling low-light daytime gaps (irradiance < 50 W/m²): helps house2 slightly, hurts
+  house1 badly (its gaps are real outages, not inverter sleep).
+- A pooled cross-site model on per-kWp output: reactor R² dropped 0.86 -> 0.80. The sites'
+  per-kWp behavior differs too much (DC/AC ratio, orientation), confirming the per-site choice.
+- Hyperparameter tuning of the boosting model: no measurable gain over defaults.
+
+Known limitation: the reactor only spans Dec 2025 - Jun 2026, so every held-out window is an
+unseen season. Its daily ts_cv scores stay unstable until a full year of data exists.
 
 A feature-set experiment (`feature_experiment.py`) confirmed the full feature set is fine:
 dropping global_tilted_irradiance barely changes scores (it is not a "cheat" feature), and

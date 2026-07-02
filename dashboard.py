@@ -132,7 +132,9 @@ def get_clipping_curve() -> pd.DataFrame:
 @st.cache_resource
 def _compact_model(site_name: str):
     """Small RandomForest on irradiance + hour (sin/cos) + temperature, for the
-    interactive predict widget. Cached so the sliders stay responsive."""
+    interactive predict widget. Cached so the sliders stay responsive.
+    build_features fills unreported night quarters with 0, so this model has
+    learned that nights produce nothing."""
     from sklearn.ensemble import RandomForestRegressor
     from features import build_features
 
@@ -141,6 +143,13 @@ def _compact_model(site_name: str):
     model = RandomForestRegressor(n_estimators=120, random_state=42, n_jobs=-1)
     model.fit(feats, y)
     return model
+
+
+def _clip_pred(site_name: str, value: float) -> float:
+    """Clip a 15-min prediction to what is physically possible: never negative,
+    never more than the inverter passes in a quarter (kW x 0.25 = kWh)."""
+    cap = SITE_INFO[site_name]["inverter_kw"] * 0.25
+    return max(0.0, min(cap, float(value)))
 
 
 def predict_compact(site_name: str, irradiance: float, hour: int, temp: float) -> float:
@@ -152,7 +161,7 @@ def predict_compact(site_name: str, irradiance: float, hour: int, temp: float) -
         "hour_sin": np.sin(radians), "hour_cos": np.cos(radians),
         "temperature_2m (°C)": temp,
     }])
-    return max(0.0, float(_compact_model(site_name).predict(row)[0]))
+    return _clip_pred(site_name, _compact_model(site_name).predict(row)[0])
 
 
 def _irr_profile(peak_wm2: float, peak_hour: float = 12.5, sigma: float = 3.5) -> tuple:
@@ -186,7 +195,7 @@ def predict_sweep(site_name: str, hour: int, temp: float) -> list:
         "hour_cos": [math.cos(radians)] * len(irr_range),
         "temperature_2m (°C)": [temp] * len(irr_range),
     })
-    return [max(0.0, float(p)) for p in model.predict(df)]
+    return [_clip_pred(site_name, p) for p in model.predict(df)]
 
 
 @st.cache_data
@@ -200,7 +209,7 @@ def predict_day_hourly(site_name: str, irr_profile: tuple, temp_profile: tuple) 
         "hour_cos": [math.cos(2 * math.pi * h / 24) for h in hours],
         "temperature_2m (°C)": list(temp_profile),
     })
-    return [max(0.0, float(p)) for p in model.predict(df)]
+    return [_clip_pred(site_name, p) for p in model.predict(df)]
 
 
 def fetch_today_weather() -> tuple:
@@ -296,7 +305,7 @@ def predict_day(site_name: str, irr_profile: tuple, temp: float) -> list:
         "hour_cos": [math.cos(2 * math.pi * h / 24) for h in hours],
         "temperature_2m (°C)": [temp] * 24,
     })
-    return [max(0.0, float(p)) for p in model.predict(df)]
+    return [_clip_pred(site_name, p) for p in model.predict(df)]
 
 
 @st.cache_data
@@ -732,7 +741,9 @@ def page_ml_models():
     st.markdown(
         "A model trained across sites could confuse hardware differences with weather/orientation. The "
         "**DC/AC ratio** (panel kWp vs inverter kW) differs a lot, and a high ratio means the inverter "
-        "**clips** output at high irradiance, a per-site non-linearity from hardware alone."
+        "**clips** output at high irradiance, a per-site non-linearity from hardware alone. "
+        "We verified this empirically: a pooled per-kWp model trained on all three sites scored *worse* "
+        "on the reactor than its own single-site model (R² 0.86 vs 0.80), so per-site models stay."
     )
     st.markdown("**Clipping is visible in the data** — max output flattens once the inverter limit is hit:")
     clip = get_clipping_curve()
@@ -747,9 +758,9 @@ def page_ml_models():
                       "time_split means the model is trained on older data and tested on the newest period, the honest test for time-series. "
                       "A random split would let the model peek at same-day values during training and look better than it really is.")
     st.markdown(
-        "Three models, three ways of splitting the data. We rank on **time_split** (train on the past, "
-        "test on the newest period), the only honest split for time-series: a random split leaks "
-        "same-day quarters into both train and test."
+        "Three ML models plus the physics baseline, three ways of splitting the data. We rank on "
+        "**time_split** (train on the past, test on the newest period), the only honest split for "
+        "time-series: a random split leaks same-day quarters into both train and test."
     )
     results = get_ml_csv("results.csv")
     res_q = results[(results["resolution"] == "quarterly") & (results["method"] == "time_split")]
@@ -765,7 +776,38 @@ def page_ml_models():
                    help=f"R² = {row['r2']:.3f} — share of variance explained (1.0 = perfect). "
                         f"MAE = {row['mae_kwh']:.3f} kWh per 15-min slot — average absolute prediction error. "
                         f"Evaluated on a time split: trained on older data, tested on the most recent period.")
-    st.caption("Forest wins on quarter-hourly data (non-linear); linear tends to win on smoother daily totals.")
+    st.caption(
+        "Daily totals are no longer a separate model: the quarterly model's predictions are summed "
+        "per day, which beat the standalone daily models nearly everywhere (reactor 0.32 → 0.81)."
+    )
+
+    st.subheader("What made the models better",
+                 help="Four changes, each validated on the honest time split before being adopted. "
+                      "Numbers below are R² for the boosting model; the daily columns sum its "
+                      "quarter-hourly predictions per day.")
+    st.markdown(
+        "- **Nights count as zero.** The houses' PV loggers don't report at night, so those quarters "
+        "were missing and got dropped: the model never learned that nights produce nothing. A panel at "
+        "night produces exactly 0, so missing night quarters are now filled with 0 (roughly doubling "
+        "the training data). Missing *daytime* quarters stay excluded: for House 1 many are real "
+        "logging outages at productive hours, and zero-filling those made the model worse.\n"
+        "- **Clear-sky index.** Measured irradiance divided by the theoretical cloudless maximum: "
+        "'how cloudy' as one number, independent of season and hour.\n"
+        "- **Physical limits.** Predictions are clipped to the inverter's capacity (kW × 0.25 kWh per "
+        "quarter), so no forecast can exceed what the hardware passes.\n"
+        "- **Daily = summed quarterly.** The standalone daily models had only 196–534 samples; "
+        "summing the quarterly model per day replaced them."
+    )
+    st.markdown(
+        "| R² (time split) | house1 15-min | house2 15-min | reactor 15-min | house1 daily | house2 daily | reactor daily |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| before | 0.60 | 0.78 | 0.86 | 0.49 | 0.69 | 0.32 |\n"
+        "| after | **0.75** | **0.84** | 0.86 | **0.58** | **0.77** | **0.81** |"
+    )
+    st.caption(
+        "The reactor's 15-min score is flat because its meter already records nights. Hyperparameter "
+        "tuning and cross-site pooling were also tested and added nothing, so they were not adopted."
+    )
 
     st.subheader("Does the ML earn its keep? Physics baseline",
                  help="The physics baseline predicts output straight from horizontal irradiance (a single-feature "
@@ -791,9 +833,10 @@ def page_ml_models():
                       title="Physics baseline vs best ML model per site", **PLOTLY_LAYOUT)
     st.plotly_chart(fig, width="stretch")
     st.caption(
-        "On quarter-hourly data the ML roughly triples the explained variance for the houses "
+        "On quarter-hourly data the ML roughly doubles the explained variance for the houses "
         "(irradiance alone is a poor proxy once orientation and clipping matter), and still adds a clear "
-        "margin at the near-south Reactor."
+        "margin at the near-south Reactor. The baseline itself improved with the night fill: predicting "
+        "zero at zero irradiance is trivially right, which is exactly why the honest comparison keeps it in."
     )
 
     st.subheader("What lag features add",
@@ -801,7 +844,8 @@ def page_ml_models():
                       "rolling averages. PV output is autocorrelated, so recent sunlight helps predict the next slot.")
     st.markdown(
         "PV output carries momentum: a bright previous hour usually means a bright next slot. Adding recent "
-        "irradiance (`fair_lag`) on top of the leak-free feature set (`fair`) lifts the honest score, most on House 1."
+        "irradiance (`fair_lag`) on top of the leak-free feature set (`fair`) lifts the honest score for the "
+        "houses, most on House 1."
     )
     lag_rows = []
     for site in SITES:
@@ -815,8 +859,9 @@ def page_ml_models():
                          "with lags (fair_lag)": round(lag, 3), "gain": round(lag - fair, 3)})
     st.dataframe(pd.DataFrame(lag_rows), width="stretch", hide_index=True)
     st.caption(
-        "Quarterly, honest time_split. The gain is largest where the raw weather signal is noisier; "
-        "for the Reactor the plain feature set was already strong, so lags add little."
+        "Quarterly, honest time_split. The gain is largest where the raw weather signal is noisier. "
+        "For the Reactor the plain feature set was already strong and lags now cost a fraction on this "
+        "split; cross-validation still picks fair_lag as its most robust variant."
     )
 
     st.subheader("General vs specific models",
@@ -834,7 +879,9 @@ def page_ml_models():
     st.dataframe(pivot.style.format("{:.3f}", subset=list(SITES)), width="stretch")
     st.caption(
         "Surprises: irradiance alone is weak without the hour of day, and adding season hurts under a "
-        "time split. Temperature helps, it's a direct physical driver."
+        "time split. Temperature helps, it's a direct physical driver. Note: this experiment predates "
+        "the target fixes above, so its absolute scores run lower; the relative comparison is what "
+        "drove the feature choices."
     )
 
     st.subheader("Inferred panel orientation")

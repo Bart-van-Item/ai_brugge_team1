@@ -81,6 +81,10 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 **Models** (`page_ml_models`)
 - "Why per-site models": clipping curve (max output vs irradiance, normalized per site).
 - "Model comparison": bar chart of R² per model per site (time_split), with best-model metrics.
+- "What made the models better": the target fixes (night fill, clear-sky index, inverter cap,
+  daily = summed quarterly) with the before/after R² table.
+- "Physics baseline": irradiance-only fit vs best ML model per site.
+- "What lag features add": fair vs fair_lag comparison table.
 - "General vs specific models": pivot table comparing feature-set variants by R².
 - "Inferred panel orientation": table of peak hour, centre of mass, azimuth, facing.
 

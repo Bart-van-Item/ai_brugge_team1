@@ -53,6 +53,13 @@ is the reference for why the cleaning does what it does.
   ~4 months of NaN energy with valid weather at the start. This is correct: the join is complete, energy is
   simply absent before the panels started reporting.
 - Daily aggregation uses `sum(min_count=1)`, so a day with no readings stays NaN instead of summing to 0.
+- The clean CSVs keep all of this as NaN on purpose. One exception happens later, at feature-build time:
+  the ML (`machine-learning/features.py`) fills missing *night* quarters (`is_day == 0`) with 0, because a
+  PV panel at night produces exactly 0; the houses' loggers simply don't report it. Missing daytime
+  quarters stay NaN everywhere: for house1 a large share are real logging outages at productive hours.
+  Consequence for daily totals: most house days are undercounted a little (median daytime coverage
+  ~90%), which is also why daily figures are derived from the quarterly model rather than trained on
+  the daily sums directly (see `docs/machine-learning.md`).
 
 ## Clean output reference
 
