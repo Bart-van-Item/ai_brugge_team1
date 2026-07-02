@@ -767,6 +767,58 @@ def page_ml_models():
                         f"Evaluated on a time split: trained on older data, tested on the most recent period.")
     st.caption("Forest wins on quarter-hourly data (non-linear); linear tends to win on smoother daily totals.")
 
+    st.subheader("Does the ML earn its keep? Physics baseline",
+                 help="The physics baseline predicts output straight from horizontal irradiance (a single-feature "
+                      "linear fit). It's the floor to beat: if a model can't clear it, the extra complexity isn't paying off.")
+    st.markdown(
+        "Solar output should track sunlight, so the simplest honest benchmark is *output proportional to "
+        "irradiance*. The gap between that baseline and the full models is the value the ML actually adds."
+    )
+    variants = get_ml_csv("variant_results.csv")
+    vq = variants[(variants["resolution"] == "quarterly") & (variants["method"] == "time_split") &
+                  (variants["variant"] == "fair_lag")]
+    phys = vq[vq["model"] == "physics"].set_index("site")["r2"]
+    bestml = vq[vq["model"] != "physics"].groupby("site")["r2"].max()
+    base = pd.DataFrame({"site": list(SITES)})
+    base["physics"] = base["site"].map(phys)
+    base["best_ml"] = base["site"].map(bestml)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=base["site"], y=base["physics"], name="Physics baseline",
+                         marker_color="#b0b0b0"))
+    fig.add_trace(go.Bar(x=base["site"], y=base["best_ml"], name="Best ML model",
+                         marker_color="#1f77b4"))
+    fig.update_layout(height=380, barmode="group", yaxis_title="R² (time_split)",
+                      title="Physics baseline vs best ML model per site", **PLOTLY_LAYOUT)
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        "On quarter-hourly data the ML roughly triples the explained variance for the houses "
+        "(irradiance alone is a poor proxy once orientation and clipping matter), and still adds a clear "
+        "margin at the near-south Reactor."
+    )
+
+    st.subheader("What lag features add",
+                 help="A lag feature is the irradiance from a few steps earlier (15, 30, 60 min ago) plus short "
+                      "rolling averages. PV output is autocorrelated, so recent sunlight helps predict the next slot.")
+    st.markdown(
+        "PV output carries momentum: a bright previous hour usually means a bright next slot. Adding recent "
+        "irradiance (`fair_lag`) on top of the leak-free feature set (`fair`) lifts the honest score, most on House 1."
+    )
+    lag_rows = []
+    for site in SITES:
+        fair = variants[(variants.site == site) & (variants.variant == "fair") &
+                        (variants.method == "time_split") & (variants.resolution == "quarterly") &
+                        (variants.model != "physics")]["r2"].max()
+        lag = variants[(variants.site == site) & (variants.variant == "fair_lag") &
+                       (variants.method == "time_split") & (variants.resolution == "quarterly") &
+                       (variants.model != "physics")]["r2"].max()
+        lag_rows.append({"site": site, "without lags (fair)": round(fair, 3),
+                         "with lags (fair_lag)": round(lag, 3), "gain": round(lag - fair, 3)})
+    st.dataframe(pd.DataFrame(lag_rows), width="stretch", hide_index=True)
+    st.caption(
+        "Quarterly, honest time_split. The gain is largest where the raw weather signal is noisier; "
+        "for the Reactor the plain feature set was already strong, so lags add little."
+    )
+
     st.subheader("General vs specific models",
                  help="A feature is an input the model uses to predict output, such as irradiance, hour of day or temperature. "
                       "n_features is how many inputs each variant uses. The question here is whether a small set of well-chosen features predicts as well as the full set.")
