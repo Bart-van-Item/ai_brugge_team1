@@ -42,6 +42,7 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 - Explains the three raw data sources (PV output, reactor meter, weather) in a table.
 - Notes on what is and isn't known about the panels (no brand/model, EAN code meaning).
 - Table of the weather predictor columns and their meaning.
+- "Sources & attribution": Open-Meteo (CC BY 4.0) and the PV data collection.
 
 ### Sites
 
@@ -50,13 +51,14 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
   explanatory tooltips.
 - "Daily output" line chart with 7-day average.
 - "Average day shape": mean output per 15-min slot across sunny days, showing the
-  typical production curve (peak hour reveals orientation).
+  typical production curve, with a peak-hour + facing callout underneath.
 
 **Compare** (`page_compare`)
 - "Compare by" selector with four views:
   - Specific yield (kWh/kWp) — grouped monthly bar chart, size-normalized.
   - Output over time — line chart, Day/Week/Month toggle.
-  - Average day shape — line chart of all sites overlaid.
+  - Average day shape — all sites overlaid, each normalized to its own peak so
+    only the timing differs (reactor peaks earliest, due south).
   - Characteristics table — kWp, inverter, DC/AC, orientation, mean daily kWh, mean kWh/kWp.
 
 ### Analysis
@@ -97,13 +99,14 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
   irradiance profile, shows predicted curve and estimated daily total per site.
 
 **Today** (`page_today`)
-- Button to fetch today's full weather picture live from the Open-Meteo API.
+- Button to fetch today's full weather picture live from the Open-Meteo API
+  (friendly empty-state card before the first fetch).
 - Runs each site's best model (ts_cv winner from results.csv) on the 15-min grid;
   the Predict page keeps the compact slider model.
 - Peak irradiance and average temperature metrics.
 - Predicted output curve for all sites, with actual output overlaid (dashed) if the
   dataset already contains today.
-- Estimated daily total per site.
+- Estimated daily total per site as metric cards, with Open-Meteo CC BY 4.0 credit.
 
 **This week** (`page_this_week`)
 - Button to fetch the 7-day forecast (full weather set) from Open-Meteo.
@@ -142,7 +145,10 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 
 ### Layout and helpers
 - `render_site(name)` — shared body for the three site pages.
-- `filter_controls(key, with_sites)` — the Filters expander (date range + site multiselect).
+- `filter_controls(key, with_sites)` — the Filters expander (date range + site multiselect);
+  the collapsed header shows the active date range.
+- `_fetch_empty_state(message)` — placeholder card on Today/This week before the first fetch.
+- Sidebar footer caption with the dataset summary and Open-Meteo attribution.
 - `in_range(index, date_range)` / `date_bounds()` — date filtering helpers.
 - `period_delta(series, date_range)` — percentage change vs the previous equal-length period.
 

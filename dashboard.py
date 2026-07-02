@@ -33,6 +33,7 @@ from orientation import estimate_azimuth  # noqa: E402
 
 SITE_COLORS = {"house1": "#1f77b4", "house2": "#ff7f0e", "reactor": "#2ca02c"}
 SITE_FILL = {"house1": "rgba(31,119,180,0.12)", "house2": "rgba(255,127,14,0.12)", "reactor": "rgba(44,160,44,0.12)"}
+SITE_DOT = {"house1": "🔵", "house2": "🟠", "reactor": "🟢"}  # matches SITE_COLORS for text labels
 
 # installation metadata, used by the site pages and Compare
 SITE_INFO = {
@@ -313,6 +314,23 @@ def weather_icon(code: int) -> tuple:
     return WMO_ICONS.get(code, ("🌡️", WMO_LABELS.get(code, f"Code {code}")))
 
 
+def _fetch_empty_state(message: str):
+    """Friendly placeholder shown on the forecast pages before the first fetch."""
+    with st.container(border=True):
+        st.markdown(
+            "<div style='text-align:center;padding:26px 12px'>"
+            "<div style='font-size:34px'>🛰️</div>"
+            "<div style='font-size:16px;font-weight:600;margin-top:6px'>No weather loaded yet</div>"
+            f"<div style='color:#9ca3af;font-size:13px;margin-top:4px;'>{message}</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+
+OPEN_METEO_CREDIT = ("Weather data by [Open-Meteo](https://open-meteo.com) "
+                     "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), lat=50.908 lon=3.248.")
+
+
 @st.cache_data
 def predict_day(site_name: str, irr_profile: tuple, temp: float) -> list:
     """Predicted output for each of 24 hours given an irradiance profile."""
@@ -371,8 +389,10 @@ MIN_DATE, MAX_DATE = date_bounds()
 
 def filter_controls(key: str, with_sites: bool = True):
     """Date range (+ optional site filter) shown inline above the graphs, inside
-    an expander so it stays close to the charts without taking much space."""
-    with st.expander("Filters", expanded=False):
+    an expander so it stays close to the charts without taking much space.
+    The active range shows in the collapsed header."""
+    current = st.session_state.get(f"{key}_date", (MIN_DATE, MAX_DATE))
+    with st.expander(f"Filters — {current[0]:%d %b %Y} to {current[1]:%d %b %Y}", expanded=False):
         date_range = st.slider(
             "Date range", min_value=MIN_DATE, max_value=MAX_DATE,
             value=(MIN_DATE, MAX_DATE), key=f"{key}_date",
@@ -475,6 +495,15 @@ def page_data_guide():
         {"column": "is_day", "unit": "0/1", "meaning": "daylight flag"},
     ]), width="stretch", hide_index=True)
 
+    st.subheader("Sources & attribution")
+    st.markdown(
+        "- **Weather (historical and forecast):** [Open-Meteo](https://open-meteo.com) for the Bruges "
+        "region, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); based on ERA5 and "
+        "national weather model data.\n"
+        "- **PV output:** per-15-minute inverter and grid-meter readings from the three installations, "
+        "collected by AI Brugge Team 1 since January 2025."
+    )
+
 
 def render_site(name: str):
     info = SITE_INFO[name]
@@ -540,7 +569,10 @@ def render_site(name: str):
                   color_discrete_sequence=[color])
     fig.update_layout(height=340, **PLOTLY_LAYOUT)
     st.plotly_chart(fig, width="stretch")
-    st.caption("Average over sunny days. The peak time reflects orientation: morning = east, midday = south, evening = west.")
+    st.caption(
+        f"Average over sunny days. Peak around **{profile.idxmax():02d}:00 UTC**, consistent with the "
+        f"array facing **{orient['facing']}** (morning peak = east, midday = south, evening = west)."
+    )
 
 
 def page_house1():
@@ -607,16 +639,20 @@ def page_compare():
         st.plotly_chart(fig, width="stretch")
         return
 
-    # Average day shape
+    # Average day shape, each site normalized to its own peak so the shapes
+    # overlay; otherwise the reactor dwarfs the houses and hides the timing
     fig = go.Figure()
     for name in selected_sites:
         profile = get_daily_profile(name)
-        fig.add_trace(go.Scatter(x=profile.index, y=profile.values, name=name,
+        rel = profile / profile.max()
+        fig.add_trace(go.Scatter(x=rel.index, y=rel.values, name=name,
                                  mode="lines+markers", line=dict(color=SITE_COLORS[name])))
-    fig.update_layout(height=450, xaxis_title="Hour of day (UTC)", yaxis_title="Mean output (kWh / 15 min)",
-                      title="Average day shape per site", **PLOTLY_LAYOUT)
+    fig.update_layout(height=450, xaxis_title="Hour of day (UTC)",
+                      yaxis_title="Relative output (share of own peak)",
+                      title="Average day shape per site (normalized)", **PLOTLY_LAYOUT)
     st.plotly_chart(fig, width="stretch")
-    st.caption("The peak time reveals orientation: reactor peaks near midday (south), the houses later (south-west).")
+    st.caption("Each curve is scaled to its own peak, so only the timing differs. The reactor peaks "
+               "earliest (near solar noon, due south); the houses peak later (south-west).")
 
 
 def page_time_of_day():
@@ -1051,7 +1087,8 @@ def page_today():
                 st.error(f"Could not fetch weather data: {exc}")
 
     if "today_fc" not in st.session_state:
-        st.info("Press the button above to load today's weather and run the prediction.")
+        _fetch_empty_state("Pull today's hourly weather live from Open-Meteo, then run each "
+                           "site's best model to predict the full production day.")
         return
 
     hourly = st.session_state["today_fc"]["hourly"]
@@ -1118,21 +1155,14 @@ def page_today():
     if not has_actual:
         st.caption("No actual output data found for today in the dataset — showing prediction only.")
 
-    fig_totals = go.Figure()
-    for name in SITES:
-        fig_totals.add_trace(go.Bar(
-            x=[SITE_INFO[name]["label"]], y=[daily_totals[name]],
-            marker_color=SITE_COLORS[name], showlegend=False,
-            text=[f"{daily_totals[name]:.1f} kWh"], textposition="outside",
-        ))
-    fig_totals.update_layout(
-        yaxis_title="Estimated daily output (kWh)",
-        title="Estimated total for today",
-        height=320,
-        **PLOTLY_LAYOUT,
-    )
-    st.plotly_chart(fig_totals, width="stretch")
-    st.caption(f"Source: Open-Meteo forecast API, lat=50.908 lon=3.248. Fetched for {fetched_date}.")
+    total_cols = st.columns(len(SITES))
+    for col, name in zip(total_cols, SITES):
+        col.metric(
+            f"{SITE_DOT[name]} {SITE_INFO[name]['label']}",
+            f"{daily_totals[name]:.1f} kWh",
+            help=f"Estimated total for today. {SITES[name]['kwp']} kWp installed.",
+        )
+    st.caption(f"Estimated day totals. {OPEN_METEO_CREDIT} Fetched for {fetched_date}.")
 
 
 def page_this_week():
@@ -1151,7 +1181,8 @@ def page_this_week():
                 st.error(f"Could not fetch weather data: {exc}")
 
     if "week" not in st.session_state:
-        st.info("Press the button above to load the 7-day forecast and run the prediction.")
+        _fetch_empty_state("Pull the 7-day forecast live from Open-Meteo, then run each site's "
+                           "best model for the estimated production of the week ahead.")
         return
 
     week = st.session_state["week"]
@@ -1230,7 +1261,7 @@ def page_this_week():
         title="Predicted output this week", height=460, **PLOTLY_LAYOUT,
     )
     st.plotly_chart(fig_hourly, width="stretch")
-    st.caption(f"Source: Open-Meteo forecast API, lat=50.908 lon=3.248. Forecast for {dates[0]} to {dates[-1]}.")
+    st.caption(f"{OPEN_METEO_CREDIT} Forecast for {dates[0]} to {dates[-1]}.")
 
 
 # --- navigation -------------------------------------------------------------
@@ -1257,5 +1288,7 @@ nav = st.navigation({
         st.Page(page_today, title="Today"),
         st.Page(page_this_week, title="This week"),
     ],
-})
+}, expanded=True)  # always show all pages, no "View more" collapse
+st.sidebar.caption("Per-15-min PV & weather · Bruges region · since Jan 2025 · "
+                   "weather by [Open-Meteo](https://open-meteo.com) (CC BY 4.0)")
 nav.run()
