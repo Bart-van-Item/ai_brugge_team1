@@ -441,7 +441,7 @@ def page_overview():
             RESAMPLE_RULES[resolution]).sum(min_count=1)
         color = SITE_COLORS[name]
         fig.add_trace(go.Scatter(
-            x=agg.index, y=agg.values, name=name,
+            x=agg.index, y=agg.values, name=name, legendgroup=name,
             fill="tozeroy", mode="lines",
             line=dict(color=color, width=1.5),
             fillcolor=SITE_FILL[name],
@@ -451,7 +451,7 @@ def page_overview():
             fig.add_trace(go.Scatter(
                 x=rolling.index, y=rolling.values, name=f"{name} 7d avg",
                 mode="lines", line=dict(color=color, width=2, dash="dash"),
-                showlegend=False, hoverinfo="skip",
+                showlegend=False, legendgroup=name, hoverinfo="skip",
             ))
     fig.update_layout(yaxis_title="Energy (kWh)", xaxis_title="Date",
                       title=f"{resolution} energy output per site", height=450,
@@ -746,12 +746,15 @@ def page_anomalies():
         daily = get_yield_ratio(name, min_rad)[lambda d: in_range(d.index, date_range)]
         anomalies = get_anomalies(name, z_threshold, min_rad)
         anomalies = anomalies[in_range(anomalies.index, date_range)]
+        # legendgroup ties the anomaly markers to their site's line, so hiding a
+        # site via the legend hides its flagged days too
         fig.add_trace(go.Scatter(x=daily.index, y=daily["ratio"], name=name,
+                                 legendgroup=name,
                                  line=dict(color=SITE_COLORS[name], width=1.5)))
         if len(anomalies):
             fig.add_trace(go.Scatter(
                 x=anomalies.index, y=anomalies["ratio"], mode="markers",
-                name=f"{name} anomaly", showlegend=False,
+                name=f"{name} anomaly", showlegend=False, legendgroup=name,
                 marker=dict(color="#e63946", size=10, symbol="x-open", line=dict(width=2.5, color="#e63946")),
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d}</b><br>"
