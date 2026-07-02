@@ -109,6 +109,12 @@ The theme/combination experiment tables below predate these fixes, so their abso
 lower; the relative comparisons (which features matter) still hold and are what drove the
 feature choices.
 
+The dashboard's forecast pages (Today / This week) run these best models directly on the full
+Open-Meteo hourly forecast (same variables, units and UTC timestamps as the training data),
+interpolated onto the 15-min training grid; lag features are built from the forecast irradiance
+series itself. Only the Predict page keeps the compact irradiance + hour + temperature model,
+because its three sliders cannot drive 25 features.
+
 Also tested, **not** adopted:
 - Zero-filling low-light daytime gaps (irradiance < 50 W/m²): helps house2 slightly, hurts
   house1 badly (its gaps are real outages, not inverter sleep).

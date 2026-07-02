@@ -198,83 +198,102 @@ def predict_sweep(site_name: str, hour: int, temp: float) -> list:
     return [_clip_pred(site_name, p) for p in model.predict(df)]
 
 
-@st.cache_data
-def predict_day_hourly(site_name: str, irr_profile: tuple, temp_profile: tuple) -> list:
-    """Like predict_day but accepts per-hour temperature values."""
-    model = _compact_model(site_name)
-    hours = list(range(24))
-    df = pd.DataFrame({
-        "shortwave_radiation (W/m²)": list(irr_profile),
-        "hour_sin": [math.sin(2 * math.pi * h / 24) for h in hours],
-        "hour_cos": [math.cos(2 * math.pi * h / 24) for h in hours],
-        "temperature_2m (°C)": list(temp_profile),
-    })
-    return [_clip_pred(site_name, p) for p in model.predict(df)]
+# Open-Meteo hourly variable -> training column name. The forecast API is the
+# same source (and units) as the training weather, so the best models can run
+# on it directly. Covers the fair feature set plus terrestrial radiation for
+# the clear-sky index; the leaky tilted irradiance is not fetched.
+FORECAST_VARS = {
+    "temperature_2m": "temperature_2m (°C)",
+    "relative_humidity_2m": "relative_humidity_2m (%)",
+    "dew_point_2m": "dew_point_2m (°C)",
+    "apparent_temperature": "apparent_temperature (°C)",
+    "shortwave_radiation": "shortwave_radiation (W/m²)",
+    "direct_radiation": "direct_radiation (W/m²)",
+    "diffuse_radiation": "diffuse_radiation (W/m²)",
+    "direct_normal_irradiance": "direct_normal_irradiance (W/m²)",
+    "terrestrial_radiation": "terrestrial_radiation (W/m²)",
+    "weather_code": "weather_code (wmo code)",
+    "wind_speed_10m": "wind_speed_10m (km/h)",
+    "visibility": "visibility (m)",
+    "is_day": "is_day ()",
+}
+# step values: repeat instead of interpolate when moving to the 15-min grid
+FORECAST_STEP_VARS = ["weather_code (wmo code)", "is_day ()"]
 
 
-def fetch_today_weather() -> tuple:
-    """Fetch today's hourly irradiance and temperature from Open-Meteo (same source as the dataset)."""
-    today = date.today().isoformat()
+def fetch_forecast(days: int) -> dict:
+    """Fetch `days` days of the full hourly weather set from Open-Meteo (UTC,
+    same variables and units as the training data), plus the daily summary
+    (weather code, min/max temperature) for the forecast cards."""
     resp = requests.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
             "latitude": 50.908,
             "longitude": 3.248,
-            "hourly": "shortwave_radiation,temperature_2m",
-            "timezone": "GMT",
-            "start_date": today,
-            "end_date": today,
-        },
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    irr = tuple(float(v) for v in data["hourly"]["shortwave_radiation"])
-    temp = tuple(float(v) for v in data["hourly"]["temperature_2m"])
-    return irr, temp
-
-
-def fetch_week_weather(days: int = 7) -> dict:
-    """Fetch the next `days` days from Open-Meteo. Returns a dict with per-day
-    hourly irradiance/temperature (24-value tuples, for the model) plus a daily
-    summary (weather code, min/max temperature) for the forecast cards."""
-    resp = requests.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": 50.908,
-            "longitude": 3.248,
-            "hourly": "shortwave_radiation,temperature_2m",
+            "hourly": ",".join(FORECAST_VARS),
             "daily": "weather_code,temperature_2m_max,temperature_2m_min",
             "timezone": "GMT",
             "forecast_days": days,
         },
-        timeout=10,
+        timeout=15,
     )
     resp.raise_for_status()
     data = resp.json()
-    times = data["hourly"]["time"]
-    irr = [float(v) for v in data["hourly"]["shortwave_radiation"]]
-    temp = [float(v) for v in data["hourly"]["temperature_2m"]]
+    hourly = pd.DataFrame(
+        {col: data["hourly"][var] for var, col in FORECAST_VARS.items()},
+        index=pd.to_datetime(data["hourly"]["time"]),
+    ).astype(float)
     daily = data["daily"]
-
-    dates, irr_by_day, temp_by_day = [], [], []
-    for d in range(days):
-        lo, hi = d * 24, d * 24 + 24
-        if hi > len(irr):
-            break
-        dates.append(times[lo][:10])
-        irr_by_day.append(tuple(irr[lo:hi]))
-        temp_by_day.append(tuple(temp[lo:hi]))
-
-    n = len(dates)
+    n = min(days, len(daily["time"]))
     return {
-        "dates": dates,
-        "irr_by_day": irr_by_day,
-        "temp_by_day": temp_by_day,
+        "hourly": hourly,
+        "dates": daily["time"][:n],
         "code": [int(c) for c in daily["weather_code"][:n]],
         "temp_max": [float(v) for v in daily["temperature_2m_max"][:n]],
         "temp_min": [float(v) for v in daily["temperature_2m_min"][:n]],
     }
+
+
+def _to_quarter_grid(hourly: pd.DataFrame) -> pd.DataFrame:
+    """Resample an hourly forecast onto the 15-min grid the models were trained
+    on: smooth variables are time-interpolated, step variables repeated."""
+    grid = pd.date_range(hourly.index.min(),
+                         hourly.index.max() + pd.Timedelta(minutes=45), freq="15min")
+    df = hourly.reindex(grid)
+    smooth = [c for c in df.columns if c not in FORECAST_STEP_VARS]
+    df[smooth] = df[smooth].interpolate(method="time", limit_direction="both")
+    df[FORECAST_STEP_VARS] = df[FORECAST_STEP_VARS].ffill().bfill()
+    return df
+
+
+@st.cache_resource
+def _forecast_model(site_name: str):
+    """The site's best model for the Today/This week pages: the model type that
+    wins the ts_cv ranking in results.csv, trained on the fair_lag features
+    (the winning setup for all sites). Trained here rather than loaded from
+    models/ because those artifacts are gitignored."""
+    from features import build_features
+    from train import make_model
+
+    results = get_ml_csv("results.csv")
+    ranked = results[(results["resolution"] == "quarterly") & (results["method"] == "ts_cv")
+                     & (results["model"] != "physics") & (results["site"] == site_name)]
+    best = ranked.sort_values("r2").iloc[-1]
+    X, y = build_features(site_name, "quarterly", feature_set="fair", add_lags=True)
+    return make_model(best["model"]).fit(X, y)
+
+
+def predict_forecast(site_name: str, hourly: pd.DataFrame) -> pd.Series:
+    """15-min predictions (kWh per quarter) over a forecast window, from the
+    site's best model. The first two hours fall in the lag warm-up window and
+    count as 0, which is exact for a window starting at midnight UTC."""
+    from features import build_forecast_features
+
+    grid = _to_quarter_grid(hourly)
+    X = build_forecast_features(grid)
+    pred = _forecast_model(site_name).predict(X)
+    pred = pd.Series([_clip_pred(site_name, p) for p in pred], index=X.index)
+    return pred.reindex(grid.index, fill_value=0.0)
 
 
 # WMO code -> (emoji, short label) for the forecast cards
@@ -1018,31 +1037,29 @@ def page_today():
     today_str = date.today().isoformat()
     st.title(f"Today — {today_str}")
     st.markdown(
-        "Fetch today's weather from Open-Meteo (the same source as the training data) and run the "
-        "compact model for all three sites. If the dataset already contains today's actual output, "
-        "it is overlaid as a dashed line."
+        "Fetch today's weather from Open-Meteo (the same source as the training data) and run each "
+        "site's **best model** (see the Models page) on the full weather picture. If the dataset "
+        "already contains today's actual output, it is overlaid as a dashed line."
     )
 
     if st.button("Fetch today's weather", type="primary"):
         with st.spinner("Fetching from Open-Meteo..."):
             try:
-                irr, temp_vals = fetch_today_weather()
-                st.session_state["today_irr"] = irr
-                st.session_state["today_temp"] = temp_vals
+                st.session_state["today_fc"] = fetch_forecast(1)
                 st.session_state["today_date"] = today_str
             except Exception as exc:
                 st.error(f"Could not fetch weather data: {exc}")
 
-    if "today_irr" not in st.session_state:
+    if "today_fc" not in st.session_state:
         st.info("Press the button above to load today's weather and run the prediction.")
         return
 
-    irr_profile = st.session_state["today_irr"]
-    temp_profile = st.session_state["today_temp"]
+    hourly = st.session_state["today_fc"]["hourly"]
     fetched_date = st.session_state["today_date"]
     hours_x = list(range(24))
+    irr_profile = hourly["shortwave_radiation (W/m²)"].tolist()
 
-    avg_temp = sum(temp_profile) / len(temp_profile)
+    avg_temp = hourly["temperature_2m (°C)"].mean()
     peak_irr = max(irr_profile)
     c1, c2 = st.columns(2)
     c1.metric("Peak irradiance", f"{peak_irr:.0f} W/m²",
@@ -1063,10 +1080,11 @@ def page_today():
     daily_totals = {}
     has_actual = False
     for name in SITES:
-        preds = predict_day_hourly(name, irr_profile, temp_profile)
-        daily_totals[name] = sum(preds) * 4
+        preds = predict_forecast(name, hourly)
+        daily_totals[name] = float(preds.sum())
+        pred_hours = preds.index.hour + preds.index.minute / 60
         fig.add_trace(go.Scatter(
-            x=hours_x, y=preds, name=SITE_INFO[name]["label"],
+            x=pred_hours, y=preds.values, name=SITE_INFO[name]["label"],
             mode="lines", line=dict(color=SITE_COLORS[name], width=2.5),
             hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + " predicted</extra>",
         ))
@@ -1076,9 +1094,9 @@ def page_today():
             mask = joined.index.strftime("%Y-%m-%d") == fetched_date
             actual_today = joined.loc[mask, "energy"]
             if not actual_today.empty:
-                actual_hourly = actual_today.resample("h").sum()
+                actual_hours = actual_today.index.hour + actual_today.index.minute / 60
                 fig.add_trace(go.Scatter(
-                    x=list(range(len(actual_hourly))), y=actual_hourly.values,
+                    x=actual_hours, y=actual_today.values,
                     name=f"{SITE_INFO[name]['label']} actual",
                     mode="lines", line=dict(color=SITE_COLORS[name], width=2, dash="dash"),
                     hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + " actual</extra>",
@@ -1120,14 +1138,15 @@ def page_today():
 def page_this_week():
     st.title("This week")
     st.markdown(
-        "Fetch the 7-day weather forecast from Open-Meteo and run the compact model for all three "
-        "sites. Shows the estimated daily total per day and the full hourly output curve across the week."
+        "Fetch the 7-day weather forecast from Open-Meteo and run each site's **best model** "
+        "(see the Models page) on the full weather picture. Shows the estimated daily total per "
+        "day and the predicted output curve across the week."
     )
 
     if st.button("Fetch 7-day forecast", type="primary"):
         with st.spinner("Fetching from Open-Meteo..."):
             try:
-                st.session_state["week"] = fetch_week_weather()
+                st.session_state["week"] = fetch_forecast(7)
             except Exception as exc:
                 st.error(f"Could not fetch weather data: {exc}")
 
@@ -1137,8 +1156,7 @@ def page_this_week():
 
     week = st.session_state["week"]
     dates = week["dates"]
-    irr_by_day = week["irr_by_day"]
-    temp_by_day = week["temp_by_day"]
+    hourly = week["hourly"]
 
     # weather outlook: one card per day, before the graphs
     st.subheader("Weather outlook")
@@ -1157,12 +1175,12 @@ def page_this_week():
         )
     st.divider()
 
-    # daily total per site: sum of 15-min predictions (kWh/15min x4 per hour value)
-    daily_totals = {name: [] for name in SITES}
-    for day_idx in range(len(dates)):
-        for name in SITES:
-            preds = predict_day_hourly(name, irr_by_day[day_idx], temp_by_day[day_idx])
-            daily_totals[name].append(sum(preds) * 4)
+    # one 15-min prediction series per site across the whole window
+    week_preds = {name: predict_forecast(name, hourly) for name in SITES}
+    daily_totals = {}
+    for name in SITES:
+        per_day = week_preds[name].groupby(week_preds[name].index.strftime("%Y-%m-%d")).sum()
+        daily_totals[name] = [float(per_day.get(d, 0.0)) for d in dates]
 
     week_total = {name: sum(vals) for name, vals in daily_totals.items()}
     cols = st.columns(len(SITES))
@@ -1188,33 +1206,28 @@ def page_this_week():
     )
     st.plotly_chart(fig_daily, width="stretch")
 
-    st.subheader("Hourly output across the week",
-                 help="The full predicted output curve, hour by hour, over all forecast days. Each daily bump is one production day; overcast days stay low.")
-    hours_x = list(range(24 * len(dates)))
+    st.subheader("Output across the week",
+                 help="The full predicted output curve, per 15 minutes, over all forecast days. Each daily bump is one production day; overcast days stay low.")
     fig_hourly = go.Figure()
-    all_irr = [v for day in irr_by_day for v in day]
     fig_hourly.add_trace(go.Scatter(
-        x=hours_x, y=all_irr, name="Irradiance",
+        x=hourly.index, y=hourly["shortwave_radiation (W/m²)"], name="Irradiance",
         mode="lines", fill="tozeroy",
         line=dict(color="rgba(255,190,30,0.7)", width=1),
         fillcolor="rgba(255,190,30,0.07)", yaxis="y2",
         hovertemplate="%{y:.0f} W/m²<extra>Irradiance</extra>",
     ))
     for name in SITES:
-        preds = [p for day_idx in range(len(dates))
-                 for p in predict_day_hourly(name, irr_by_day[day_idx], temp_by_day[day_idx])]
+        preds = week_preds[name]
         fig_hourly.add_trace(go.Scatter(
-            x=hours_x, y=preds, name=SITE_INFO[name]["label"],
+            x=preds.index, y=preds.values, name=SITE_INFO[name]["label"],
             mode="lines", line=dict(color=SITE_COLORS[name], width=2),
             hovertemplate="%{y:.3f} kWh<extra>" + SITE_INFO[name]["label"] + "</extra>",
         ))
-    # one tick per day at midday
-    tickvals = [d * 24 + 12 for d in range(len(dates))]
     fig_hourly.update_layout(
-        xaxis=dict(title="Day", tickmode="array", tickvals=tickvals, ticktext=dates),
+        xaxis=dict(title="Day"),
         yaxis=dict(title="Output (kWh / 15 min)"),
         yaxis2=dict(title="Irradiance (W/m²)", overlaying="y", side="right", showgrid=False, range=[0, 1050]),
-        title="Predicted hourly output this week", height=460, **PLOTLY_LAYOUT,
+        title="Predicted output this week", height=460, **PLOTLY_LAYOUT,
     )
     st.plotly_chart(fig_hourly, width="stretch")
     st.caption(f"Source: Open-Meteo forecast API, lat=50.908 lon=3.248. Forecast for {dates[0]} to {dates[-1]}.")

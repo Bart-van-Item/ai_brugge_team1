@@ -97,11 +97,19 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
   irradiance profile, shows predicted curve and estimated daily total per site.
 
 **Today** (`page_today`)
-- Button to fetch today's weather live from the Open-Meteo API.
+- Button to fetch today's full weather picture live from the Open-Meteo API.
+- Runs each site's best model (ts_cv winner from results.csv) on the 15-min grid;
+  the Predict page keeps the compact slider model.
 - Peak irradiance and average temperature metrics.
 - Predicted output curve for all sites, with actual output overlaid (dashed) if the
   dataset already contains today.
 - Estimated daily total per site.
+
+**This week** (`page_this_week`)
+- Button to fetch the 7-day forecast (full weather set) from Open-Meteo.
+- Weather outlook cards (icon, label, min/max temperature per day).
+- Runs each site's best model on the 15-min grid: 7-day totals, daily bar chart,
+  and the predicted 15-min output curve across the week.
 
 ## Functions
 
@@ -115,15 +123,22 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 - `get_clipping_curve()` — max output per irradiance bin, normalized per site.
 - `get_daily_profile(site)` — average output per hour of day over sunny days.
 
-### Prediction (compact in-memory model)
+### Prediction — compact model (Predict page sliders)
 - `_compact_model(site)` — small RandomForest on irradiance + hour (sin/cos) + temperature,
-  cached with `@st.cache_resource`.
+  cached with `@st.cache_resource`. Used only where the user drives 3 sliders.
 - `predict_compact(site, irradiance, hour, temp)` — single prediction.
 - `predict_sweep(site, hour, temp)` — predictions across all irradiance levels.
 - `predict_day(site, irr_profile, temp)` — 24-hour prediction from an irradiance profile.
-- `predict_day_hourly(site, irr_profile, temp_profile)` — same, with per-hour temperature.
-- `fetch_today_weather()` — pulls today's hourly irradiance and temperature from Open-Meteo.
 - `_irr_profile(peak, ...)` — synthetic Gaussian irradiance curve for the day simulator.
+- `_clip_pred(site, value)` — clips any prediction to [0, inverter capacity per quarter].
+
+### Prediction — best model (Today / This week pages)
+- `FORECAST_VARS` — Open-Meteo hourly variable -> training column name (full fair set).
+- `fetch_forecast(days)` — full hourly weather set + daily summary from Open-Meteo (UTC).
+- `_to_quarter_grid(hourly)` — interpolates the hourly forecast onto the 15-min training grid.
+- `_forecast_model(site)` — the site's best model type (ts_cv winner in results.csv) trained
+  on the fair_lag features, cached with `@st.cache_resource`.
+- `predict_forecast(site, hourly)` — 15-min prediction series (kWh/quarter) over the window.
 
 ### Layout and helpers
 - `render_site(name)` — shared body for the three site pages.

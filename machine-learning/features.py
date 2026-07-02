@@ -114,6 +114,42 @@ def load_clean(site_name: str, resolution: str) -> pd.DataFrame:
     )
 
 
+def _assemble_features(df: pd.DataFrame, resolution: str, feature_set: str,
+                       add_lags: bool) -> pd.DataFrame:
+    """The X matrix from a weather frame on a continuous time grid. Shared by
+    training (build_features) and forecasting (build_forecast_features) so the
+    column set and order always match what the models were fit on."""
+    if feature_set == "all":
+        weather_cols = [c for c in WEATHER_FEATURES if c in df.columns]
+    elif feature_set == "fair":
+        weather_cols = [c for c in WEATHER_FEATURES if c in df.columns and c != LEAKY_FEATURE]
+    elif feature_set == "lean":
+        weather_cols = [c for c in LEAN_WEATHER if c in df.columns]
+    else:
+        raise ValueError(feature_set)
+
+    X = df[weather_cols].copy()
+
+    # clear-sky index: measured irradiance vs the theoretical (cloudless) maximum,
+    # i.e. "how cloudy", independent of season and hour. 0 at night by definition.
+    terrestrial = df["terrestrial_radiation (W/m²)"]
+    X["clearsky_index"] = (
+        (df[LAG_BASE] / terrestrial.where(terrestrial > 10)).clip(0, 1.5).fillna(0.0)
+    )
+
+    if add_lags:
+        lags = QUARTERLY_LAGS if resolution == "quarterly" else DAILY_LAGS
+        rolls = QUARTERLY_ROLL if resolution == "quarterly" else DAILY_ROLL
+        X = pd.concat([X, _lag_features(df, lags, rolls)], axis=1)
+
+    idx = df.index
+    time_parts = [_cyclical(pd.Series(idx.dayofyear, index=idx, name="dayofyear"), 366),
+                  _cyclical(pd.Series(idx.month, index=idx, name="month"), 12)]
+    if resolution == "quarterly":
+        time_parts.append(_cyclical(pd.Series(idx.hour, index=idx, name="hour"), 24))
+    return pd.concat([X] + time_parts, axis=1)
+
+
 def build_features(site_name: str, resolution: str, feature_set: str = "all",
                    add_lags: bool = False):
     """Return (X, y) with rows that have a real energy reading and complete
@@ -134,38 +170,19 @@ def build_features(site_name: str, resolution: str, feature_set: str = "all",
         night_gap = (df["is_day ()"] == 0) & df[TARGET].isna()
         df.loc[night_gap, TARGET] = 0.0
 
-    if feature_set == "all":
-        weather_cols = [c for c in WEATHER_FEATURES if c in df.columns]
-    elif feature_set == "fair":
-        weather_cols = [c for c in WEATHER_FEATURES if c in df.columns and c != LEAKY_FEATURE]
-    elif feature_set == "lean":
-        weather_cols = [c for c in LEAN_WEATHER if c in df.columns]
-    else:
-        raise ValueError(feature_set)
-
-    X = df[weather_cols].copy()
-
-    # clear-sky index: measured irradiance vs the theoretical (cloudless) maximum,
-    # i.e. "how cloudy", independent of season and hour. 0 at night by definition.
-    terrestrial = df["terrestrial_radiation (W/m²)"]
-    X["clearsky_index"] = (
-        (df[LAG_BASE] / terrestrial.where(terrestrial > 10)).clip(0, 1.5).fillna(0.0)
-    )
-
     # lag features are computed on the full grid before dropping NaN energy rows
-    if add_lags:
-        lags = QUARTERLY_LAGS if resolution == "quarterly" else DAILY_LAGS
-        rolls = QUARTERLY_ROLL if resolution == "quarterly" else DAILY_ROLL
-        X = pd.concat([X, _lag_features(df, lags, rolls)], axis=1)
-
-    idx = df.index
-    time_parts = [_cyclical(pd.Series(idx.dayofyear, index=idx, name="dayofyear"), 366),
-                  _cyclical(pd.Series(idx.month, index=idx, name="month"), 12)]
-    if resolution == "quarterly":
-        time_parts.append(_cyclical(pd.Series(idx.hour, index=idx, name="hour"), 24))
-    X = pd.concat([X] + time_parts, axis=1)
+    X = _assemble_features(df, resolution, feature_set, add_lags)
 
     X = X.dropna()                      # drop rows with any missing feature
     y = df.loc[X.index, TARGET]
     keep = y.notna()                    # only rows with a real energy reading
     return X.loc[keep], y.loc[keep]
+
+
+def build_forecast_features(weather: pd.DataFrame, feature_set: str = "fair",
+                            add_lags: bool = True) -> pd.DataFrame:
+    """X matrix for prediction from forecast weather on a continuous 15-min grid,
+    using the training weather column names. Defaults to the fair_lag setup the
+    best models use. The first rows fall inside the lag warm-up window and are
+    dropped; with a forecast starting at midnight those are night quarters."""
+    return _assemble_features(weather, "quarterly", feature_set, add_lags).dropna()
