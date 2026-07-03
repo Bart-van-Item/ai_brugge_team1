@@ -1393,4 +1393,7 @@ nav = st.navigation({
 }, expanded=True)  # always show all pages, no "View more" collapse
 st.sidebar.caption("Per-15-min PV & weather · Bruges region · since Jan 2025 · "
                    "weather by [Open-Meteo](https://open-meteo.com) (CC BY 4.0)")
+_, _qr_col, _ = st.sidebar.columns([1, 4, 1])
+_qr_col.image("assets/qrcode_ai-brugge-team1.png", width="stretch",
+              caption="ai-brugge-team1.streamlit.app")
 nav.run()

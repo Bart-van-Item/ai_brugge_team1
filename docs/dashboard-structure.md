@@ -158,7 +158,8 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 - `filter_controls(key, with_sites)` — the Filters expander (date range + site multiselect);
   the collapsed header shows the active date range.
 - `_fetch_empty_state(message)` — placeholder card on Today/This week before the first fetch.
-- Sidebar footer caption with the dataset summary and Open-Meteo attribution.
+- Sidebar footer caption with the dataset summary and Open-Meteo attribution,
+  plus a QR code (`assets/qrcode_ai-brugge-team1.png`) linking to the deployed app.
 - `in_range(index, date_range)` / `date_bounds()` — date filtering helpers.
 - `period_delta(series, date_range)` — percentage change vs the previous equal-length period.
 
