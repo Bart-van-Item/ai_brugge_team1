@@ -476,13 +476,6 @@ def page_overview():
             line=dict(color=color, width=1.5),
             fillcolor=SITE_FILL[name],
         ))
-        if resolution == "Day" and len(agg) >= 7:
-            rolling = agg.rolling(7, center=True, min_periods=4).mean()
-            fig.add_trace(go.Scatter(
-                x=rolling.index, y=rolling.values, name=f"{name} 7d avg",
-                mode="lines", line=dict(color=color, width=2, dash="dash"),
-                showlegend=False, legendgroup=name, hoverinfo="skip",
-            ))
     fig.update_layout(yaxis_title="Energy (kWh)", xaxis_title="Date",
                       title=f"{resolution} energy output per site", height=450,
                       **PLOTLY_LAYOUT)

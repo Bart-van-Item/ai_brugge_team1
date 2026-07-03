@@ -37,8 +37,7 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 - Title + intro paragraph.
 - One `st.metric` per site: total kWh over the selected range, with a delta vs
   the previous equal-length period.
-- "Energy output over time" area chart, with a Day/Week/Month aggregation toggle
-  and a 7-day rolling average when viewing daily.
+- "Energy output over time" area chart, with a Day/Week/Month aggregation toggle.
 
 **Data guide** (`page_data_guide`)
 - Explains the three raw data sources (PV output, reactor meter, weather) in a table.
