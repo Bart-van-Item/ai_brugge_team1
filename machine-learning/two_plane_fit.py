@@ -34,7 +34,7 @@ from tilt_fit import (clear_samples, poa_irradiance, facing_label,  # noqa: E402
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-RESULTS_PATH = HERE / "two_plane_results.csv"
+RESULTS_PATH = HERE / "results" / "two_plane_results.csv"
 
 TILT_GRID = np.arange(4, 64, 4)          # 0 excluded: a flat pair is one plane
 AZIMUTH_GRID = np.arange(60, 304, 8)     # degrees from north: 90=E, 180=S, 270=W

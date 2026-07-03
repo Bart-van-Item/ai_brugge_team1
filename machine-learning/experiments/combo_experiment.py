@@ -26,8 +26,8 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, mean_absolute_error
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+ML = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ML))
 from features import build_features  # noqa: E402
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -86,7 +86,7 @@ def main():
     print("R² per combination per site (forest, time_split):\n")
     print(pivot.to_string())
 
-    results.to_csv(HERE / "combo_results.csv", index=False)
+    results.to_csv(ML / "results" / "combo_results.csv", index=False)
     print("\nWrote combo_results.csv")
 
 

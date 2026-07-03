@@ -125,7 +125,7 @@ Also tested, **not** adopted:
 Known limitation: the reactor only spans Dec 2025 - Jun 2026, so every held-out window is an
 unseen season. Its daily ts_cv scores stay unstable until a full year of data exists.
 
-A feature-set experiment (`feature_experiment.py`) confirmed the full feature set is fine:
+A feature-set experiment (`experiments/feature_experiment.py`) confirmed the full feature set is fine:
 dropping global_tilted_irradiance barely changes scores (it is not a "cheat" feature), and
 trimming to fewer features makes things slightly worse. So the scores above are roughly the
 ceiling for these weather features; tuning features further is not where the gains are.
@@ -133,7 +133,7 @@ ceiling for these weather features; tuning features further is not where the gai
 ## General vs specific (theme) models
 
 We keep the full-feature model as the **general** allrounder, and compare it against models
-trained on one theme of features each (`theme_experiment.py`). R² per theme per site (forest,
+trained on one theme of features each (`experiments/theme_experiment.py`). R² per theme per site (forest,
 time_split):
 
 | theme        | features | house1 | house2 | reactor | what it isolates                          |
@@ -153,7 +153,7 @@ Takeaways (this is the story for the dashboard reasoning section):
 - **time/season alone works for the reactor** (0.68, a large near-flat array whose output tracks
   the sun's daily arc closely) but not for the houses (0.17-0.20, more irregular profiles).
 
-### Combinations (`combo_experiment.py`)
+### Combinations (`experiments/combo_experiment.py`)
 
 Building on `direction`, we tested adding season and/or temperature. R² per combination
 per site (forest, time_split):

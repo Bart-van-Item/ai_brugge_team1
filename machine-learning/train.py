@@ -65,8 +65,8 @@ from features import build_features, quarter_cap_kwh, LAG_BASE  # noqa: E402
 sys.stdout.reconfigure(encoding="utf-8")
 
 SITES = ["house1", "house2", "reactor"]
-RESULTS_PATH = HERE / "results.csv"
-VARIANT_PATH = HERE / "variant_results.csv"
+RESULTS_PATH = HERE / "results" / "results.csv"
+VARIANT_PATH = HERE / "results" / "variant_results.csv"
 MODELS_DIR = HERE / "models"
 MODELS_DIR.mkdir(exist_ok=True)
 

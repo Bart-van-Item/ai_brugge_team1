@@ -55,7 +55,7 @@ WEATHER_FILES = {
     "house2": RAW / "house2" / "weer_data_house2.csv",
     "reactor": RAW / "reactor" / "weer_reactor.csv",
 }
-RESULTS_PATH = HERE / "tilt_results.csv"
+RESULTS_PATH = HERE / "results" / "tilt_results.csv"
 
 GHI = "shortwave_radiation (W/m²)"
 DNI = "direct_normal_irradiance (W/m²)"

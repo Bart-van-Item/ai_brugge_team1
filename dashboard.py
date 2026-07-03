@@ -116,7 +116,7 @@ def get_anomalies(site_name: str, z: float, min_rad: float) -> pd.DataFrame:
 
 @st.cache_data
 def get_ml_csv(name: str) -> pd.DataFrame:
-    return pd.read_csv(ML_DIR / name)
+    return pd.read_csv(ML_DIR / "results" / name)
 
 
 @st.cache_data

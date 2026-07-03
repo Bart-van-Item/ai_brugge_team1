@@ -35,7 +35,8 @@ analysis.py             data loading (SITES) + overview/daily/specific-yield sum
 weather_correlation.py  joins PV with weather, correlation and temperature analysis
 anomalies.py            daily yield ratio and anomaly flagging
 dashboard.py            interactive Streamlit dashboard (5 tabs, incl. machine learning)
-machine-learning/       model training, experiments, orientation estimate, saved models
+machine-learning/       training + orientation/tilt scripts; experiments/ (one-off studies),
+                        results/ (generated CSVs), models/ (saved artifacts, gitignored)
 plots/                  matplotlib scripts that save static PNGs to plots/output/
 docs/                   data-dictionary.md, data-prep.md, analysis-notes.md, machine-learning.md
 ```

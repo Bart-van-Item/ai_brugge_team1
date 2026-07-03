@@ -5,7 +5,7 @@ output and weather data alone, with no metadata and no site visit. This covers
 assignment goal 3, including the multi-direction question. Code:
 `machine-learning/tilt_fit.py` (single plane, two-stage) and
 `machine-learning/two_plane_fit.py` (two-direction decomposition). Results land
-in `tilt_results.csv` and `two_plane_results.csv`, shown on the dashboard's
+in `machine-learning/results/`, shown on the dashboard's
 Models page under "Panel orientation and tilt".
 
 ## Results
@@ -155,7 +155,7 @@ combination is visible in the data.
 ## Reproducing
 
 ```
-python machine-learning/tilt_fit.py        # writes tilt_results.csv
-python machine-learning/two_plane_fit.py   # writes two_plane_results.csv
+python machine-learning/tilt_fit.py        # writes results/tilt_results.csv
+python machine-learning/two_plane_fit.py   # writes results/two_plane_results.csv
 python machine-learning/orientation.py     # prints the cross-check
 ```

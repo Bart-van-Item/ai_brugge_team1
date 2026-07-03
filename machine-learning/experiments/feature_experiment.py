@@ -24,8 +24,8 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score, mean_absolute_error
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+ML = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ML))
 from features import build_features  # noqa: E402
 
 sys.stdout.reconfigure(encoding="utf-8")
