@@ -1,0 +1,4 @@
+site,tilt_1,azimuth_1,facing_1,share_1,tilt_2,azimuth_2,facing_2,share_2,r2_two_plane,r2_single_plane,gain,n_samples
+house1,60,236,SW,0.79,60,244,WSW,0.21,0.5496,0.5492,0.0003,5739
+house2,60,252,WSW,0.82,60,260,W,0.18,0.7715,0.7712,0.0003,8172
+reactor,28,268,W,0.77,32,252,WSW,0.23,0.7533,0.7529,0.0004,2510

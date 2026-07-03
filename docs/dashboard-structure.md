@@ -48,8 +48,8 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 ### Sites
 
 **House 1 / House 2 / Reactor** (`render_site`)
-- Four metrics: Installed (kWp), Inverter (kW), DC/AC ratio, Orientation. All have
-  explanatory tooltips.
+- Four metrics: Installed (kWp), Inverter (kW), DC/AC ratio, Orientation (fitted
+  facing + tilt from `tilt_results.csv`). All have explanatory tooltips.
 - "Daily output" line chart with 7-day average.
 - "Average day shape": mean output per 15-min slot across sunny days, showing the
   typical production curve, with a peak-hour + facing callout underneath.
@@ -60,7 +60,8 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
   - Output over time — line chart, Day/Week/Month toggle.
   - Average day shape — all sites overlaid, each normalized to its own peak so
     only the timing differs (reactor peaks earliest, due south).
-  - Characteristics table — kWp, inverter, DC/AC, orientation, mean daily kWh, mean kWh/kWp.
+  - Characteristics table — kWp, inverter, DC/AC, orientation, estimated tilt,
+    mean daily kWh, mean kWh/kWp.
 
 ### Analysis
 
@@ -89,7 +90,11 @@ Every page except Data guide and Today shows a collapsible **Filters** expander
 - "Physics baseline": irradiance-only fit vs best ML model per site.
 - "What lag features add": fair vs fair_lag comparison table.
 - "General vs specific models": pivot table comparing feature-set variants by R².
-- "Inferred panel orientation": table of peak hour, centre of mass, azimuth, facing.
+- "Panel orientation and tilt": compass polar chart (direction = angle, tilt = radius,
+  shaded arcs = plausible ranges), results table with per-column tooltips, the
+  two-direction verdict table (`two_plane_results.csv`), and an expander with a
+  plain-language explanation of the method plus the balance-point cross-check.
+  Method details: [orientation-tilt.md](orientation-tilt.md).
 
 **Predict** (`page_predict`)
 - Three sliders: irradiance, hour of day, temperature.

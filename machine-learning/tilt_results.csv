@@ -1,0 +1,4 @@
+site,azimuth_deg,facing,azimuth_ridge,tilt_deg,tilt_ridge,r2_shape,r2_midday,r2_flat,n_samples,n_midday
+house1,236,SW,232-248,56,46-60,0.5492,0.4039,0.1554,5739,1393
+house2,252,WSW,248-260,60,56-60,0.7712,0.4688,0.083,8172,1887
+reactor,264,W,248-280,16,0-28,0.7529,0.8362,0.449,2510,623

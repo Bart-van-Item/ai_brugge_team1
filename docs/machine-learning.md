@@ -150,8 +150,8 @@ Takeaways (this is the story for the dashboard reasoning section):
 - **irradiance alone is weak** (0.19-0.65). Surprising, but without the hour of day the model
   can't tell how that radiation falls on a tilted, oriented panel. Adding the hour (-> direction
   theme) is what makes irradiance useful, which is itself evidence the orientation matters.
-- **time/season alone works for the reactor** (0.68, big south-facing array, very predictable on
-  time) but not for the houses (0.17-0.20, more irregular profiles).
+- **time/season alone works for the reactor** (0.68, a large near-flat array whose output tracks
+  the sun's daily arc closely) but not for the houses (0.17-0.20, more irregular profiles).
 
 ### Combinations (`combo_experiment.py`)
 
@@ -193,9 +193,10 @@ Consequences for the map tool:
 A real "anywhere" version would fetch irradiance for the marker's location at prediction time
 (e.g. the Open-Meteo API this data came from). Out of scope for now.
 
-## Orientation estimate
+## Orientation and tilt estimate
 
-We don't have the panel azimuth/tilt as metadata, so we estimate orientation per site from the
-shape of the average daily output profile: an east-facing array peaks in the morning, west in the
-evening, south around solar noon. The three known panels (house2 = 1 direction, reactor = 2 arrays,
-house1 = 2 directions) act as reference points. See `orientation.py`.
+We don't have the panel azimuth/tilt as metadata, so we estimate both from the data. The quick
+method (`orientation.py`) reads direction from the balance point of the average daily profile;
+the full method (`tilt_fit.py`, `two_plane_fit.py`) matches simulated plane-of-array irradiance
+against the measured output and also answers the two-direction question. Method, results and
+caveats: see [orientation-tilt.md](orientation-tilt.md).

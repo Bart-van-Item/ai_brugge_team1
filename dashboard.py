@@ -45,6 +45,16 @@ SITE_INFO = {
                 "arrays": "2 arrays (16.35 + 16.35 kWp)"},
 }
 
+# per-site nuance for the fitted orientation (see Models page for the method)
+TILT_NOTE = {
+    "house1": "The house has panels in 2 directions, but they are too similar to separate from the "
+              "output data, so this is the effective combined plane.",
+    "house2": "Single direction, confirmed by the two-plane check collapsing to one plane.",
+    "reactor": "A very low tilt plus a west-leaning day shape is the fingerprint of an east-west "
+               "'tent' pair: the two faces look nearly identical to the sun, so only their "
+               "combination is identifiable.",
+}
+
 # WMO weather codes present in this dataset, grouped for readability
 WMO_LABELS = {
     0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
@@ -544,9 +554,12 @@ def render_site(name: str):
                    f"The ratio is panel capacity ({SITES[name]['kwp']} kWp DC) divided by inverter capacity ({info['inverter_kw']} kW AC). "
                    f"Above 1.0 means the panels can produce more than the inverter can export, so output is clipped on very sunny days. "
                    f"This is intentional: sunny peak hours are short, so oversizing the panels increases total yield without needing a bigger inverter.")
-    orient = get_orientations().set_index("site").loc[name]
-    c4.metric("Orientation", orient["facing"],
-              help=f"Estimated from the daily output profile. Azimuth {orient['azimuth_deg']}° — 180° is due south, below 180° is east of south, above 180° is west of south.")
+    tilt = get_ml_csv("tilt_results.csv").set_index("site").loc[name]
+    c4.metric("Orientation", f"{tilt['facing']} · {tilt['tilt_deg']}° tilt",
+              help=f"Estimated from the data by matching simulated panel planes to the measured output "
+                   f"(method on the Models page). Azimuth {tilt['azimuth_deg']}° — 90° is east, 180° south, "
+                   f"270° west — plausible range {tilt['azimuth_ridge']}°; tilt plausible range "
+                   f"{tilt['tilt_ridge']}°. {TILT_NOTE[name]}")
     st.caption(info["arrays"])
 
     cov = get_coverage(name)
@@ -594,7 +607,7 @@ def render_site(name: str):
     st.plotly_chart(fig, width="stretch")
     st.caption(
         f"Average over sunny days. Peak around **{profile.idxmax():02d}:00 UTC**, consistent with the "
-        f"array facing **{orient['facing']}** (morning peak = east, midday = south, evening = west)."
+        f"array facing **{tilt['facing']}** (morning peak = east, midday = south, evening = west)."
     )
 
 
@@ -622,14 +635,15 @@ def page_compare():
     )
 
     if view == "Characteristics table":
-        orient = get_orientations().set_index("site")
+        tilt = get_ml_csv("tilt_results.csv").set_index("site")
         rows = []
         for name in SITES:
             daily = get_daily_energy(name)[lambda s: in_range(s.index, date_range)]
             rows.append({
                 "site": SITE_INFO[name]["label"], "kWp": SITES[name]["kwp"],
                 "inverter (kW)": SITE_INFO[name]["inverter_kw"], "DC/AC": SITE_INFO[name]["dcac"],
-                "orientation": orient.loc[name, "facing"],
+                "orientation": f"{tilt.loc[name, 'facing']} ({tilt.loc[name, 'azimuth_deg']}°)",
+                "tilt (est.)": f"~{tilt.loc[name, 'tilt_deg']}°",
                 "mean daily kWh": round(daily.mean(), 1),
                 "mean kWh/kWp": round((daily / SITES[name]["kwp"]).mean(), 2),
             })
@@ -674,8 +688,9 @@ def page_compare():
                       yaxis_title="Relative output (share of own peak)",
                       title="Average day shape per site (normalized)", **PLOTLY_LAYOUT)
     st.plotly_chart(fig, width="stretch")
-    st.caption("Each curve is scaled to its own peak, so only the timing differs. The reactor peaks "
-               "earliest (near solar noon, due south); the houses peak later (south-west).")
+    st.caption("Each curve is scaled to its own peak, so only the timing differs. The reactor's "
+               "near-flat east-west layout gives a broad curve centred near solar noon; the steep "
+               "west-south-west houses peak later in the afternoon.")
 
 
 def page_time_of_day():
@@ -693,7 +708,7 @@ def page_time_of_day():
                       yaxis_title="Mean output (kWh / 15 min)", title="Average output by hour of day",
                       **PLOTLY_LAYOUT)
     st.plotly_chart(fig, width="stretch")
-    st.caption("Averaged over sunny days. Times are UTC; local solar noon is around 12-13h UTC.")
+    st.caption("Averaged over sunny days. Times are UTC; solar noon at this longitude is ~11:47 UTC.")
 
 
 def page_weather():
@@ -916,8 +931,9 @@ def page_ml_models():
     st.caption(
         "On quarter-hourly data the ML roughly doubles the explained variance for the houses "
         "(irradiance alone is a poor proxy once orientation and clipping matter), and still adds a clear "
-        "margin at the near-south Reactor. The baseline itself improved with the night fill: predicting "
-        "zero at zero irradiance is trivially right, which is exactly why the honest comparison keeps it in."
+        "margin at the Reactor, whose near-flat panels track plain irradiance most closely. The baseline "
+        "itself improved with the night fill: predicting zero at zero irradiance is trivially right, "
+        "which is exactly why the honest comparison keeps it in."
     )
 
     st.subheader("What lag features add",
@@ -965,12 +981,179 @@ def page_ml_models():
         "drove the feature choices."
     )
 
-    st.subheader("Inferred panel orientation")
-    st.markdown("Estimated from the daily output profile: east peaks in the morning, west in the evening, south at noon.")
-    orient = get_orientations()
-    st.dataframe(orient[["site", "peak_hour_utc", "centre_of_mass_hour", "azimuth_deg", "facing"]],
-                 width="stretch", hide_index=True)
-    st.caption("180° = due south, >180° = west of south. Reactor is near-south; the houses lean south-west.")
+    st.subheader("Panel orientation and tilt",
+                 help="Estimated purely from the output and weather data: we simulate how much sun a panel "
+                      "at every candidate direction and angle would catch, and keep the one that best matches "
+                      "the measured output. No site visit needed.")
+    st.markdown(
+        "We don't know the panels' direction or angle from metadata, so we **reverse-engineer them from "
+        "the data**: the sun's position at any moment is pure geometry, so for thousands of virtual panels "
+        "(every direction × every angle) we compute what they *would* have produced, and keep the one that "
+        "matches the meter best."
+    )
+
+    tilt = get_ml_csv("tilt_results.csv")
+    fig = go.Figure()
+    for _, row in tilt.iterrows():
+        name = row["site"]
+        color = SITE_COLORS[name]
+        label = SITE_INFO[name]["label"]
+        az_lo, az_hi = (int(v) for v in row["azimuth_ridge"].split("-"))
+        tl_lo, tl_hi = (int(v) for v in row["tilt_ridge"].split("-"))
+        # translucent arc = plausible directions, translucent spoke = plausible tilts
+        fig.add_trace(go.Scatterpolar(
+            theta=list(range(az_lo, az_hi + 1, 2)), r=[row["tilt_deg"]] * len(range(az_lo, az_hi + 1, 2)),
+            mode="lines", line=dict(color=color, width=7), opacity=0.3,
+            legendgroup=name, showlegend=False,
+            hovertemplate=f"plausible directions {az_lo}–{az_hi}°<extra>{label}</extra>",
+        ))
+        fig.add_trace(go.Scatterpolar(
+            theta=[row["azimuth_deg"]] * 2, r=[tl_lo, tl_hi],
+            mode="lines", line=dict(color=color, width=7), opacity=0.3,
+            legendgroup=name, showlegend=False,
+            hovertemplate=f"plausible tilts {tl_lo}–{tl_hi}°<extra>{label}</extra>",
+        ))
+        fig.add_trace(go.Scatterpolar(
+            theta=[row["azimuth_deg"]], r=[row["tilt_deg"]],
+            mode="markers", marker=dict(color=color, size=13, line=dict(width=2, color="white")),
+            name=label, legendgroup=name,
+            hovertemplate=(f"{row['facing']} ({row['azimuth_deg']}°), tilt {row['tilt_deg']}°"
+                           f"<extra>{label}</extra>"),
+        ))
+    fig.update_layout(
+        polar=dict(
+            angularaxis=dict(direction="clockwise", rotation=90,
+                             tickvals=list(range(0, 360, 45)),
+                             ticktext=["N", "NE", "E", "SE", "S", "SW", "W", "NW"]),
+            radialaxis=dict(range=[0, 65], tickvals=[0, 15, 30, 45, 60],
+                            ticksuffix="°", angle=90, tickangle=90),
+        ),
+        height=440, title="Best-fit plane per site (compass = direction, distance from centre = tilt)",
+        **PLOTLY_LAYOUT,
+    )
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Read it like a map seen from above: the dot's compass position is where the panels face, "
+               "and the further from the centre, the steeper they stand (centre = lying flat). "
+               "The shaded arcs are the plausible ranges: short arc = confident estimate.")
+
+    st.dataframe(
+        tilt.assign(site=tilt["site"].map(lambda s: SITE_INFO[s]["label"]))[
+            ["site", "facing", "azimuth_deg", "azimuth_ridge", "tilt_deg", "tilt_ridge", "r2_midday"]],
+        column_config={
+            "site": st.column_config.TextColumn("Site"),
+            "facing": st.column_config.TextColumn(
+                "Facing", help="Compass direction the panels point, from the best-fit azimuth."),
+            "azimuth_deg": st.column_config.NumberColumn(
+                "Azimuth (°)", help="Compass angle of the panel plane: 90° = east, 180° = south, 270° = west."),
+            "azimuth_ridge": st.column_config.TextColumn(
+                "Plausible directions", help="All azimuths that explain the data nearly as well as the best one "
+                                             "(within 0.01 R²). A narrow range means the direction is well determined."),
+            "tilt_deg": st.column_config.NumberColumn(
+                "Tilt (°)", help="Angle from horizontal: 0° = lying flat on the roof, 90° = vertical."),
+            "tilt_ridge": st.column_config.TextColumn(
+                "Plausible tilts", help="All tilts that explain the midday data nearly as well as the best one. "
+                                        "The reactor's range is wide on paper (0-28°) but every value in it is a "
+                                        "low tilt, so 'nearly flat' is a firm conclusion."),
+            "r2_midday": st.column_config.NumberColumn(
+                "Midday fit R²", format="%.2f",
+                help="How much of the clear-sky midday output the fitted plane explains (1 = perfect). "
+                     "Tilt is fitted on midday data only, because there the seasonal sun height isolates "
+                     "the tilt signal from morning/evening effects."),
+        },
+        width="stretch", hide_index=True,
+    )
+
+    st.markdown("##### Could there be a second direction?")
+    st.markdown(
+        "House 1 and the Reactor are known to have panels in **two** directions, so we also fitted every "
+        "*pair* of virtual panels, letting the data decide how much capacity faces each way. "
+        "Verdict: **a second plane never improves the fit** (gain ≈ 0), so the two faces are too similar "
+        "to separate from output data alone. House 2 (single direction) is the built-in control: its fit "
+        "correctly collapses back to one plane."
+    )
+    two = get_ml_csv("two_plane_results.csv")
+    two_disp = pd.DataFrame({
+        "site": two["site"].map(lambda s: SITE_INFO[s]["label"]),
+        "best split found": [
+            f"{r.facing_1} {r.azimuth_1}°/{r.tilt_1}° ({r.share_1:.0%}) + "
+            f"{r.facing_2} {r.azimuth_2}°/{r.tilt_2}° ({r.share_2:.0%})"
+            for r in two.itertuples()],
+        "one plane R²": two["r2_single_plane"],
+        "two planes R²": two["r2_two_plane"],
+        "gain": two["gain"],
+    })
+    st.dataframe(
+        two_disp,
+        column_config={
+            "site": st.column_config.TextColumn("Site"),
+            "best split found": st.column_config.TextColumn(
+                "Best split found", help="The best two-direction combination the search found: "
+                                         "direction, tilt and share of production for each face."),
+            "one plane R²": st.column_config.NumberColumn(
+                "One plane R²", format="%.3f", help="Fit quality with a single panel direction."),
+            "two planes R²": st.column_config.NumberColumn(
+                "Two planes R²", format="%.3f", help="Fit quality when a second direction is allowed."),
+            "gain": st.column_config.NumberColumn(
+                "Gain", format="%.4f", help="Improvement from allowing a second direction. "
+                                            "Near zero = the data does not reveal a separate second face."),
+        },
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        "Why the reactor still gives itself away: panels at *low* tilt facing opposite ways see almost the "
+        "same sky, so their sum is indistinguishable from one nearly-flat panel. A very low fitted tilt "
+        "plus a west-leaning daily shape is exactly the fingerprint of an east-west 'tent' layout."
+    )
+
+    with st.expander("How did we get these numbers? (plain-language explanation)"):
+        st.markdown(
+            "**The one idea behind all of it:** a solar panel produces the most when it points straight "
+            "at the sun. So the *shape* of a panel's production, over the day and over the seasons, "
+            "betrays which way it points. We never climbed on a roof; the meter told us.\n\n"
+            "**Step 1 — build virtual panels.** Where the sun is at any moment is pure math, like "
+            "knowing where the hands of a clock are. So we can compute, for any imaginary panel "
+            "(pick a direction, pick an angle), how much sun it *would* have caught in every 15-minute "
+            "slot of the dataset. We built thousands of these virtual panels: every compass direction "
+            "from east to west, every angle from flat to steep.\n\n"
+            "**Step 2 — find the direction.** A panel facing east has its best hours in the morning; a "
+            "panel facing west, in the afternoon. We compare each virtual panel's daily curve with the "
+            "real meter readings (only on clear moments, with the sun properly up and the inverter not "
+            "maxed out) and keep the direction that matches best. All three sites match a west-of-south "
+            "direction.\n\n"
+            "**Step 3 — find the tilt.** Around noon the winter sun hangs low (16° above the horizon "
+            "here) and the summer sun high (62°). A *steep* panel loves winter noons and wastes summer "
+            "noons; a *flat* panel is the opposite. So we look only at clear middays across the seasons "
+            "and ask which angle explains the winter-vs-summer pattern. The reactor clearly behaves "
+            "like a nearly-flat panel; the houses behave like steep ones.\n\n"
+            "**Step 4 — try two directions at once.** Some roofs have panels both ways. So we also "
+            "mixed *two* virtual panels in every possible combination and let the math choose the "
+            "blend. If a roof really had two clearly different faces, the mix would match the meter "
+            "better than any single panel. It never did, which is itself an answer: the two faces of "
+            "House 1 and the reactor are so alike to the sun that only their combination is visible.\n\n"
+            "**Honesty notes.** Each number comes with a range (everything that fits nearly as well). "
+            "The direction is solid for all sites. The tilt is very solid for the reactor and rougher "
+            "for the houses, because their steep-panel signal competes with morning haze effects, so "
+            "for the houses read the tilt as 'steep, roughly 45-60°' rather than an exact figure."
+        )
+        st.markdown("**Cross-check with a much simpler method** — just the balance point of the "
+                    "average production day (morning-heavy = east, evening-heavy = west), no simulation "
+                    "at all. It points the same way, which is reassuring:")
+        orient = get_orientations()
+        st.dataframe(orient[["site", "peak_hour_utc", "centre_of_mass_hour", "azimuth_deg", "facing"]],
+                     column_config={
+                         "site": st.column_config.TextColumn("Site"),
+                         "peak_hour_utc": st.column_config.NumberColumn(
+                             "Peak hour (UTC)", help="Hour of day with the highest average output."),
+                         "centre_of_mass_hour": st.column_config.NumberColumn(
+                             "Balance point (h)", help="Centre of mass of the average production day. "
+                                                       "Solar noon here is ~11:47 UTC; later = more west."),
+                         "azimuth_deg": st.column_config.NumberColumn(
+                             "Azimuth (°)", help="Balance-point offset from solar noon mapped to a compass "
+                                                 "angle (15° per hour). Cruder than the fit above; it "
+                                                 "understates how far west a panel faces."),
+                         "facing": st.column_config.TextColumn("Facing"),
+                     },
+                     width="stretch", hide_index=True)
 
 
 def page_predict():
@@ -1019,7 +1202,7 @@ def page_predict():
             f"{pred:.3f} kWh / 15 min",
             help=f"≈ {pred * 4:.2f} kW instantaneous. {SITES[name]['kwp']} kWp installed.",
         )
-    st.caption("Times are UTC — local solar noon is around 12–13h. The peak shifts with orientation: reactor peaks earlier (south), houses later (south-west).")
+    st.caption("Times are UTC — solar noon at this longitude is ~11:47 UTC. The peak shifts with orientation: the reactor's flat east-west layout centres near noon, the steep west-south-west houses peak later.")
 
     st.divider()
     st.subheader("Irradiance sweep")

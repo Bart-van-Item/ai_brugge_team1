@@ -8,10 +8,11 @@ noon. We take the centre-of-mass hour of the normalized daytime output profile
 (over sunny days) and map its offset from solar noon to an azimuth in degrees,
 where 180 = due south, <180 = east of south, >180 = west of south.
 
-Times in the data are UTC; local solar noon in this region (~3.3°E) is about
-12:13 UTC, shifting with daylight saving. We use a fixed reference of 13.0h UTC
-as "solar noon" since the profiles are averaged across the year. The result is a
-rough estimate, used as a feature and as a talking point, not a precise survey.
+Times in the data are UTC; solar noon at this longitude (~3.3°E) is about
+11:47 UTC (12:00 minus 4 minutes per degree east, equation-of-time wobble
+averages out over a year). The result is a rough estimate, used as a feature
+and as a talking point, not a precise survey; tilt_fit.py is the rigorous
+version and both should point the same way.
 
 Run: python machine-learning/orientation.py
 """
@@ -27,7 +28,7 @@ from features import load_clean, TARGET  # noqa: E402
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-SOLAR_NOON_UTC = 13.0   # reference hour for "south" (year-averaged, region ~3.3°E)
+SOLAR_NOON_UTC = 11.78  # true solar noon at 3.3°E: 12h - 3.3° * 4 min (~11:47 UTC)
 DEGREES_PER_HOUR = 15.0  # sun moves 15° of azimuth per hour around noon
 
 
